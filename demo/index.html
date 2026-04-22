@@ -1,436 +1,344 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>UndertriAI — Bail Decision Support</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-:root{
-  --bg:#0a0b0f;--surface:#111318;--surface2:#1a1d26;--border:#2a2d3a;
-  --accent:#6c63ff;--accent2:#a78bfa;--gold:#f59e0b;--green:#10b981;
-  --red:#ef4444;--text:#e2e8f0;--muted:#64748b;--white:#fff;
-}
-body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UndertriAI ⚖️ — Bail Assessment Environment</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0a0d1a;
+      --surface: #111827;
+      --surface2: #1a2236;
+      --border: #1e2d45;
+      --indigo: #6366f1;
+      --teal: #14b8a6;
+      --green: #22c55e;
+      --red: #ef4444;
+      --amber: #f59e0b;
+      --text: #e2e8f0;
+      --muted: #64748b;
+      --mono: 'JetBrains Mono', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
 
-/* HERO */
-.hero{text-align:center;padding:60px 20px 40px;position:relative}
-.hero::before{content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);
-  width:600px;height:400px;background:radial-gradient(ellipse,rgba(108,99,255,.15) 0%,transparent 70%);pointer-events:none}
-.badge{display:inline-block;background:rgba(108,99,255,.15);border:1px solid rgba(108,99,255,.4);
-  color:var(--accent2);font-size:.75rem;font-weight:600;padding:4px 14px;border-radius:20px;
-  letter-spacing:.08em;text-transform:uppercase;margin-bottom:24px}
-h1{font-size:clamp(2rem,5vw,3.5rem);font-weight:800;line-height:1.1;
-   background:linear-gradient(135deg,#fff 0%,var(--accent2) 100%);
-   -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:16px}
-.subtitle{font-size:1.1rem;color:var(--muted);max-width:600px;margin:0 auto 40px;line-height:1.7}
-.stat-row{display:flex;justify-content:center;gap:40px;flex-wrap:wrap;margin-bottom:48px}
-.stat{text-align:center}
-.stat-num{font-size:2rem;font-weight:800;color:var(--accent2)}
-.stat-label{font-size:.8rem;color:var(--muted);margin-top:4px}
+    header {
+      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 20px 32px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .logo { display: flex; align-items: center; gap: 12px; }
+    .logo-icon {
+      width: 44px; height: 44px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--indigo), var(--teal));
+      display: flex; align-items: center; justify-content: center; font-size: 22px;
+      box-shadow: 0 0 18px rgba(99,102,241,0.4);
+    }
+    .logo h1 { font-size: 20px; font-weight: 700; }
+    .logo p { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .header-links { display: flex; gap: 10px; }
+    .pill {
+      padding: 5px 12px; border-radius: 20px; font-size: 11px; font-weight: 500;
+      border: 1px solid var(--border); color: var(--muted); text-decoration: none; transition: all 0.2s;
+    }
+    .pill:hover { border-color: var(--indigo); color: var(--indigo); }
+    .pill.primary { background: var(--indigo); color: white; border-color: var(--indigo); }
+    .pill.primary:hover { background: #4f46e5; }
 
-/* MAIN LAYOUT */
-.main{max-width:1200px;margin:0 auto;padding:0 20px 80px;display:grid;grid-template-columns:1fr 1fr;gap:24px}
-@media(max-width:900px){.main{grid-template-columns:1fr}}
+    .stats-bar {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 12px 32px; display: flex; gap: 36px;
+    }
+    .stat-val { font-size: 18px; font-weight: 700; color: var(--indigo); }
+    .stat-label { font-size: 10px; color: var(--muted); margin-top: 1px; }
 
-/* PANELS */
-.panel{background:var(--surface);border:1px solid var(--border);border-radius:16px;overflow:hidden}
-.panel-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;background:var(--surface2)}
-.panel-icon{font-size:1.1rem}
-.panel-title{font-size:.9rem;font-weight:600;color:var(--text)}
-.panel-badge{margin-left:auto;font-size:.7rem;padding:2px 8px;border-radius:10px;font-weight:600}
-.badge-live{background:rgba(16,185,129,.15);color:var(--green);border:1px solid rgba(16,185,129,.3)}
-.badge-pending{background:rgba(245,158,11,.15);color:var(--gold);border:1px solid rgba(245,158,11,.3)}
+    .main { display: grid; grid-template-columns: 1fr 400px; height: calc(100vh - 120px); }
 
-/* CASE CARD */
-.case-body{padding:20px}
-.case-meta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-.tag{font-size:.72rem;padding:3px 10px;border-radius:8px;font-weight:500;border:1px solid}
-.tag-court{background:rgba(108,99,255,.1);color:var(--accent2);border-color:rgba(108,99,255,.3)}
-.tag-crime{background:rgba(239,68,68,.1);color:#fca5a5;border-color:rgba(239,68,68,.3)}
-.tag-bail{background:rgba(245,158,11,.1);color:var(--gold);border-color:rgba(245,158,11,.3)}
-.case-title{font-size:1rem;font-weight:600;margin-bottom:12px;line-height:1.4}
-.case-field{margin-bottom:14px}
-.field-label{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:4px;font-weight:600}
-.field-value{font-size:.85rem;line-height:1.6;color:var(--text)}
-.sections{display:flex;gap:6px;flex-wrap:wrap}
-.section-chip{background:var(--surface2);border:1px solid var(--border);
-  font-family:'JetBrains Mono',monospace;font-size:.75rem;padding:2px 8px;border-radius:6px;color:var(--accent2)}
-.args-list{list-style:none}
-.args-list li{font-size:.82rem;padding:4px 0;padding-left:14px;position:relative;color:var(--text);line-height:1.5}
-.args-list li::before{content:'▸';position:absolute;left:0;color:var(--muted);font-size:.7rem;top:5px}
+    .case-panel { padding: 24px 28px; overflow-y: auto; border-right: 1px solid var(--border); }
+    .section-title {
+      font-size: 10px; font-weight: 600; letter-spacing: 1px;
+      color: var(--muted); text-transform: uppercase; margin-bottom: 12px;
+    }
+    .case-header {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 18px; margin-bottom: 18px;
+    }
+    .case-title { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+    .case-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+    .tag {
+      padding: 3px 9px; border-radius: 5px; font-size: 10px; font-weight: 500;
+      background: rgba(99,102,241,0.15); color: var(--indigo); border: 1px solid rgba(99,102,241,0.3);
+    }
+    .tag.crime { background: rgba(245,158,11,0.12); color: var(--amber); border-color: rgba(245,158,11,0.3); }
+    .tag.court { background: rgba(20,184,166,0.12); color: var(--teal); border-color: rgba(20,184,166,0.3); }
 
-/* AGENT PANEL */
-.agent-body{padding:20px}
-.step-list{list-style:none;display:flex;flex-direction:column;gap:10px;margin-bottom:20px}
-.step{display:flex;gap:12px;align-items:flex-start;opacity:.4;transition:opacity .4s}
-.step.active{opacity:1}
-.step.done{opacity:.85}
-.step-dot{width:28px;height:28px;border-radius:50%;background:var(--surface2);border:2px solid var(--border);
-  display:flex;align-items:center;justify-content:center;font-size:.75rem;flex-shrink:0;margin-top:2px;transition:all .3s}
-.step.active .step-dot{background:rgba(108,99,255,.2);border-color:var(--accent);animation:pulse 1.5s infinite}
-.step.done .step-dot{background:rgba(16,185,129,.15);border-color:var(--green);color:var(--green)}
-.step-content{}
-.step-name{font-size:.82rem;font-weight:600;margin-bottom:2px}
-.step-result{font-size:.75rem;color:var(--muted);font-family:'JetBrains Mono',monospace;line-height:1.4}
-@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(108,99,255,.4)}50%{box-shadow:0 0 0 6px rgba(108,99,255,0)}}
+    .charge-sheet {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      padding: 14px; font-size: 12px; line-height: 1.7; color: #94a3b8;
+      margin-bottom: 18px; font-family: var(--mono);
+    }
+    .args-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+    .arg-box { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+    .arg-box h4 { font-size: 10px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+    .arg-item { font-size: 11px; color: #94a3b8; padding: 3px 0; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
+    .arg-item:last-child { border-bottom: none; }
+    .arg-bullet { color: var(--indigo); flex-shrink: 0; }
+    .api-note { background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2); border-radius: 8px; padding: 10px; font-size: 10px; color: var(--muted); font-family: var(--mono); }
 
-/* MEMO OUTPUT */
-.memo{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:16px;
-  opacity:0;transform:translateY(10px);transition:all .5s}
-.memo.visible{opacity:1;transform:translateY(0)}
-.memo-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)}
-.memo-row:last-child{border-bottom:none}
-.memo-key{font-size:.78rem;color:var(--muted);font-weight:500}
-.memo-val{font-size:.82rem;font-weight:600}
-.outcome-granted{color:var(--green)}
-.outcome-denied{color:var(--red)}
-.risk-low{color:var(--green)}
-.risk-med{color:var(--gold)}
-.risk-high{color:var(--red)}
+    .sidebar { padding: 20px; overflow-y: auto; background: var(--surface); }
+    .run-btn {
+      width: 100%; padding: 13px; border-radius: 8px; border: none; cursor: pointer;
+      background: linear-gradient(135deg, var(--indigo), #4f46e5);
+      color: white; font-size: 13px; font-weight: 600;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      transition: all 0.2s; margin-bottom: 18px;
+      box-shadow: 0 4px 16px rgba(99,102,241,0.3);
+    }
+    .run-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 22px rgba(99,102,241,0.4); }
+    .run-btn:disabled { opacity: 0.5; transform: none; cursor: not-allowed; }
 
-/* REWARD PANEL */
-.reward-body{padding:20px}
-.reward-formula{font-family:'JetBrains Mono',monospace;font-size:.78rem;
-  background:var(--surface2);border:1px solid var(--border);border-radius:10px;
-  padding:12px 16px;margin-bottom:20px;color:var(--accent2);line-height:1.8}
-.reward-bars{display:flex;flex-direction:column;gap:10px}
-.bar-row{display:flex;flex-direction:column;gap:4px}
-.bar-label{display:flex;justify-content:space-between;font-size:.78rem}
-.bar-name{color:var(--muted)}
-.bar-score{font-weight:700;font-family:'JetBrains Mono',monospace}
-.bar-track{height:6px;background:var(--surface2);border-radius:3px;overflow:hidden}
-.bar-fill{height:100%;border-radius:3px;width:0;transition:width 1s ease}
-.bar-outcome{background:linear-gradient(90deg,var(--accent),var(--accent2))}
-.bar-flight{background:linear-gradient(90deg,#06b6d4,#0ea5e9)}
-.bar-stat{background:linear-gradient(90deg,#8b5cf6,#a78bfa)}
-.bar-cond{background:linear-gradient(90deg,var(--green),#34d399)}
-.bar-bias{background:linear-gradient(90deg,var(--red),#f87171)}
-.total-reward{margin-top:20px;text-align:center;padding:16px;
-  background:linear-gradient(135deg,rgba(108,99,255,.15),rgba(167,139,250,.1));
-  border:1px solid rgba(108,99,255,.3);border-radius:12px}
-.total-label{font-size:.8rem;color:var(--muted);margin-bottom:4px}
-.total-value{font-size:2.2rem;font-weight:800;font-family:'JetBrains Mono',monospace;
-  background:linear-gradient(135deg,var(--accent),var(--accent2));
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+    .tool-log {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px; margin-bottom: 18px; font-family: var(--mono);
+      font-size: 10px; min-height: 80px; max-height: 160px; overflow-y: auto; color: #64748b;
+    }
+    .log-line { padding: 2px 0; }
+    .log-line.ok { color: var(--teal); }
+    .log-line.tool { color: var(--indigo); }
+    .log-line.reward { color: var(--green); font-weight: 600; }
 
-/* CONTROLS */
-.controls{text-align:center;margin-bottom:32px}
-.btn{display:inline-flex;align-items:center;gap:8px;padding:12px 28px;border-radius:12px;
-  font-size:.9rem;font-weight:600;cursor:pointer;border:none;transition:all .2s}
-.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
-.btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(108,99,255,.4)}
-.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text);margin-left:12px}
-.btn-outline:hover{background:var(--surface2)}
+    .reward-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 18px; display: none; }
+    .reward-card.visible { display: block; animation: fadeIn 0.4s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
-/* CURRICULUM */
-.curriculum{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:28px}
-.curriculum h3{font-size:1rem;font-weight:700;margin-bottom:20px;color:var(--text)}
-.stages{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
-@media(max-width:700px){.stages{grid-template-columns:1fr 1fr}}
-.stage{padding:16px;border-radius:12px;border:1px solid var(--border);background:var(--surface2);cursor:pointer;transition:all .2s}
-.stage:hover{border-color:var(--accent);transform:translateY(-2px)}
-.stage.current{border-color:var(--accent);background:rgba(108,99,255,.08)}
-.stage-num{font-size:1.6rem;font-weight:800;color:var(--accent2);margin-bottom:6px}
-.stage-name{font-size:.82rem;font-weight:600;margin-bottom:4px}
-.stage-desc{font-size:.74rem;color:var(--muted);line-height:1.4}
-.stage-reward{font-size:.74rem;font-family:'JetBrains Mono',monospace;color:var(--green);margin-top:8px}
-</style>
+    .verdict { text-align: center; font-size: 18px; font-weight: 700; padding: 12px; border-radius: 8px; margin-bottom: 14px; }
+    .verdict.granted { background: rgba(34,197,94,0.12); color: var(--green); border: 1px solid rgba(34,197,94,0.3); box-shadow: 0 0 16px rgba(34,197,94,0.15); }
+    .verdict.denied { background: rgba(239,68,68,0.12); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }
+    .total-score { text-align: center; font-size: 40px; font-weight: 800; background: linear-gradient(135deg, var(--indigo), var(--teal)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 16px; }
+
+    .reward-bar { margin-bottom: 10px; }
+    .reward-bar-label { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px; }
+    .reward-bar-label span:first-child { color: #94a3b8; }
+    .reward-bar-label span:last-child { font-weight: 600; font-family: var(--mono); }
+    .bar-track { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 3px; transition: width 0.8s cubic-bezier(0.4,0,0.2,1); width: 0%; }
+    .bar-fill.blue { background: linear-gradient(90deg, var(--indigo), #818cf8); }
+    .bar-fill.teal { background: linear-gradient(90deg, var(--teal), #5eead4); }
+    .bar-fill.green { background: linear-gradient(90deg, var(--green), #86efac); }
+    .bar-fill.amber { background: linear-gradient(90deg, var(--amber), #fcd34d); }
+    .bar-fill.red { background: linear-gradient(90deg, var(--red), #fca5a5); }
+
+    .spinner { display: inline-block; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  </style>
 </head>
 <body>
 
-<div class="hero">
-  <div class="badge">OpenEnv · Meta PyTorch Hackathon 2025</div>
-  <h1>UndertriAI ⚖️</h1>
-  <p class="subtitle">Training LLMs to give every undertrial the quality of legal reasoning only the wealthy can afford.</p>
-  <div class="stat-row">
-    <div class="stat"><div class="stat-num">76%</div><div class="stat-label">of India's prisoners are undertrials</div></div>
-    <div class="stat"><div class="stat-num">3 min</div><div class="stat-label">per case in subordinate courts</div></div>
-    <div class="stat"><div class="stat-num">1,200</div><div class="stat-label">real HC judgments for training</div></div>
-    <div class="stat"><div class="stat-num">+0.35</div><div class="stat-label">avg reward gain after GRPO</div></div>
+<header>
+  <div class="logo">
+    <div class="logo-icon">⚖️</div>
+    <div>
+      <h1>UndertriAI</h1>
+      <p>OpenEnv RL Environment · Indian Bail Decision Support</p>
+    </div>
   </div>
-  <div class="controls">
-    <button class="btn btn-primary" onclick="runDemo()">▶ Run Agent Demo</button>
-    <button class="btn btn-outline" onclick="resetDemo()">↺ Reset</button>
+  <div class="header-links">
+    <a class="pill" href="/docs" target="_blank">Swagger Docs</a>
+    <a class="pill" href="/tools">API Tools</a>
+    <a class="pill primary" href="https://github.com/Faiz-1606/Undertrial" target="_blank">GitHub</a>
   </div>
+</header>
+
+<div class="stats-bar">
+  <div class="stat"><div class="stat-val">1,200</div><div class="stat-label">HC Judgments</div></div>
+  <div class="stat"><div class="stat-val">4</div><div class="stat-label">Curriculum Stages</div></div>
+  <div class="stat"><div class="stat-val">6</div><div class="stat-label">Legal Tools</div></div>
+  <div class="stat"><div class="stat-val">GRPO</div><div class="stat-label">Training Method</div></div>
+  <div class="stat"><div class="stat-val">-30%</div><div class="stat-label">Bias Penalty</div></div>
 </div>
 
 <div class="main">
-
-  <!-- CASE PANEL -->
-  <div class="panel">
-    <div class="panel-header">
-      <span class="panel-icon">📄</span>
-      <span class="panel-title">Case Input — Episode</span>
-      <span class="panel-badge badge-live">LIVE</span>
+  <div class="case-panel">
+    <div class="section-title">Live Demo Case — Stage 1 (Landmark)</div>
+    <div class="case-header">
+      <div class="case-title" id="caseTitle">Loading case from environment...</div>
+      <div class="case-meta" id="caseMeta"></div>
     </div>
-    <div class="case-body">
-      <div class="case-meta">
-        <span class="tag tag-court">Delhi High Court</span>
-        <span class="tag tag-crime">Fraud / Cheating</span>
-        <span class="tag tag-bail">Regular Bail</span>
+    <div class="section-title">Charge Sheet</div>
+    <div class="charge-sheet" id="chargeSheet">Connecting to environment...</div>
+    <div class="args-grid">
+      <div class="arg-box">
+        <h4>PROSECUTION ARGUMENTS</h4>
+        <div id="prosArgs"></div>
       </div>
-      <div class="case-title">Ramesh Kumar vs State of Delhi — 2023</div>
-      <div class="case-field">
-        <div class="field-label">Charge Sheet</div>
-        <div class="field-value">Ramesh Kumar, 34, an auto-rickshaw driver, was arrested under IPC §420 (Cheating) for an alleged ₹50,000 fraud. He has been in judicial custody for <strong>8 months</strong>. He has no prior criminal record, holds permanent residence in Delhi, and has two minor dependents.</div>
+      <div class="arg-box">
+        <h4>DEFENCE ARGUMENTS</h4>
+        <div id="defArgs"></div>
       </div>
-      <div class="case-field">
-        <div class="field-label">Sections Invoked</div>
-        <div class="sections">
-          <span class="section-chip">IPC 420</span>
-          <span class="section-chip">BNS 318</span>
-        </div>
-      </div>
-      <div class="case-field">
-        <div class="field-label">Prosecution Arguments</div>
-        <ul class="args-list">
-          <li>Accused allegedly defrauded complainant of ₹50,000</li>
-          <li>Investigation pending — risk of evidence tampering</li>
-        </ul>
-      </div>
-      <div class="case-field">
-        <div class="field-label">Defence Arguments</div>
-        <ul class="args-list">
-          <li>8 months custody on a 7-year max offence — approaching default bail threshold</li>
-          <li>No prior record. Permanent Delhi resident with family ties.</li>
-          <li>Sanjay Chandra v. CBI: bail is the rule, jail is the exception</li>
-        </ul>
-      </div>
+    </div>
+    <div class="api-note">
+      Environment: https://draken1606-undertrial-ai.hf.space<br/>
+      POST /reset · POST /step · GET /state · GET /health · GET /tools · WS /ws/{session_id}
     </div>
   </div>
 
-  <!-- AGENT PANEL -->
-  <div class="panel">
-    <div class="panel-header">
-      <span class="panel-icon">🤖</span>
-      <span class="panel-title">Agent Actions — Qwen2.5-7B-Instruct (GRPO)</span>
-      <span class="panel-badge badge-pending" id="agentStatus">Waiting</span>
-    </div>
-    <div class="agent-body">
-      <ul class="step-list" id="stepList">
-        <li class="step" id="s1">
-          <div class="step-dot">1</div>
-          <div class="step-content">
-            <div class="step-name">compute_statutory_eligibility</div>
-            <div class="step-result" id="r1">IPC 420 → max 7 yrs → threshold 42 mo → served 8 mo…</div>
-          </div>
-        </li>
-        <li class="step" id="s2">
-          <div class="step-dot">2</div>
-          <div class="step-content">
-            <div class="step-name">cross_reference_precedent</div>
-            <div class="step-result" id="r2">Query: "default bail cheating economic offence"…</div>
-          </div>
-        </li>
-        <li class="step" id="s3">
-          <div class="step-dot">3</div>
-          <div class="step-content">
-            <div class="step-name">classify_bail_type</div>
-            <div class="step-result" id="r3">3 grounds for / 2 against → Conditional Bail…</div>
-          </div>
-        </li>
-        <li class="step" id="s4">
-          <div class="step-dot">4</div>
-          <div class="step-content">
-            <div class="step-name">assess_surety</div>
-            <div class="step-result" id="r4">₹25,000 surety — feasible for auto-rickshaw driver…</div>
-          </div>
-        </li>
-        <li class="step" id="s5">
-          <div class="step-dot">✓</div>
-          <div class="step-content">
-            <div class="step-name">submit_memo ← TERMINAL</div>
-            <div class="step-result" id="r5">Bail Granted | Flight Risk: Low | Statutory: Eligible</div>
-          </div>
-        </li>
-      </ul>
+  <div class="sidebar">
+    <div class="section-title">Agent Demo</div>
+    <button class="run-btn" id="runBtn" onclick="runDemo()">▶ Run Bail Assessment</button>
 
-      <div class="memo" id="memo">
-        <div class="memo-row">
-          <span class="memo-key">Recommended Outcome</span>
-          <span class="memo-val outcome-granted">✓ Bail Granted</span>
-        </div>
-        <div class="memo-row">
-          <span class="memo-key">Flight Risk</span>
-          <span class="memo-val risk-low">Low</span>
-        </div>
-        <div class="memo-row">
-          <span class="memo-key">Statutory Eligible</span>
-          <span class="memo-val" style="color:var(--green)">Yes — 8/42 months (19%)</span>
-        </div>
-        <div class="memo-row">
-          <span class="memo-key">Ground Truth (HC)</span>
-          <span class="memo-val outcome-granted">✓ Bail Granted</span>
-        </div>
-        <div class="memo-row" style="border:none">
-          <span class="memo-key">Conditions</span>
-          <span class="memo-val" style="font-size:.75rem;text-align:right">₹25k surety · weekly reporting · surrender passport</span>
-        </div>
+    <div class="section-title">Agent Log</div>
+    <div class="tool-log" id="toolLog">
+      <div class="log-line">Waiting to run...</div>
+    </div>
+
+    <div class="section-title">Reward Breakdown</div>
+    <div class="reward-card" id="rewardCard">
+      <div class="verdict" id="verdictBadge"></div>
+      <div class="total-score" id="totalScore"></div>
+      <div class="reward-bar">
+        <div class="reward-bar-label"><span>Outcome Match (40%)</span><span id="v-om">—</span></div>
+        <div class="bar-track"><div class="bar-fill blue" id="b-om"></div></div>
       </div>
+      <div class="reward-bar">
+        <div class="reward-bar-label"><span>Flight Risk Accuracy (20%)</span><span id="v-fr">—</span></div>
+        <div class="bar-track"><div class="bar-fill teal" id="b-fr"></div></div>
+      </div>
+      <div class="reward-bar">
+        <div class="reward-bar-label"><span>Statutory Accuracy (20%)</span><span id="v-sa">—</span></div>
+        <div class="bar-track"><div class="bar-fill green" id="b-sa"></div></div>
+      </div>
+      <div class="reward-bar">
+        <div class="reward-bar-label"><span>Condition Score (20%)</span><span id="v-ca">—</span></div>
+        <div class="bar-track"><div class="bar-fill amber" id="b-ca"></div></div>
+      </div>
+      <div class="reward-bar">
+        <div class="reward-bar-label"><span>Bias Penalty (-30%)</span><span id="v-bp">—</span></div>
+        <div class="bar-track"><div class="bar-fill red" id="b-bp"></div></div>
+      </div>
+    </div>
+    <div class="api-note" style="font-size:10px;">
+      R = 0.4*outcome + 0.2*flight_risk + 0.2*statutory + 0.2*conditions - 0.3*bias
     </div>
   </div>
-
-  <!-- REWARD PANEL -->
-  <div class="panel">
-    <div class="panel-header">
-      <span class="panel-icon">📊</span>
-      <span class="panel-title">Reward Breakdown</span>
-    </div>
-    <div class="reward-body">
-      <div class="reward-formula">R = 0.4·outcome + 0.2·flight_risk<br>&nbsp;&nbsp;&nbsp;&nbsp;+ 0.2·statutory + 0.2·conditions<br>&nbsp;&nbsp;&nbsp;&nbsp;− 0.3·bias_penalty</div>
-      <div class="reward-bars">
-        <div class="bar-row">
-          <div class="bar-label"><span class="bar-name">Outcome Match (×0.40)</span><span class="bar-score" id="sc1">0.00</span></div>
-          <div class="bar-track"><div class="bar-fill bar-outcome" id="b1"></div></div>
-        </div>
-        <div class="bar-row">
-          <div class="bar-label"><span class="bar-name">Flight Risk Acc (×0.20)</span><span class="bar-score" id="sc2">0.00</span></div>
-          <div class="bar-track"><div class="bar-fill bar-flight" id="b2"></div></div>
-        </div>
-        <div class="bar-row">
-          <div class="bar-label"><span class="bar-name">Statutory Acc (×0.20)</span><span class="bar-score" id="sc3">0.00</span></div>
-          <div class="bar-track"><div class="bar-fill bar-stat" id="b3"></div></div>
-        </div>
-        <div class="bar-row">
-          <div class="bar-label"><span class="bar-name">Conditions (×0.20)</span><span class="bar-score" id="sc4">0.00</span></div>
-          <div class="bar-track"><div class="bar-fill bar-cond" id="b4"></div></div>
-        </div>
-        <div class="bar-row">
-          <div class="bar-label"><span class="bar-name">Bias Penalty (−×0.30)</span><span class="bar-score" id="sc5" style="color:var(--red)">0.00</span></div>
-          <div class="bar-track"><div class="bar-fill bar-bias" id="b5"></div></div>
-        </div>
-      </div>
-      <div class="total-reward">
-        <div class="total-label">TOTAL REWARD</div>
-        <div class="total-value" id="totalReward">0.000</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- CURRICULUM PANEL -->
-  <div class="panel">
-    <div class="panel-header">
-      <span class="panel-icon">🎓</span>
-      <span class="panel-title">Curriculum Training Stages</span>
-    </div>
-    <div style="padding:20px">
-      <div class="stages">
-        <div class="stage current">
-          <div class="stage-num">1</div>
-          <div class="stage-name">Statutory</div>
-          <div class="stage-desc">Landmark cases. Clear-cut eligibility. Agent learns basic computation.</div>
-          <div class="stage-reward">target ≥ 0.80</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">2</div>
-          <div class="stage-name">Contested</div>
-          <div class="stage-desc">Sessions & HC agree. Agent learns to weigh prosecution vs defence.</div>
-          <div class="stage-reward">target ≥ 0.70</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">3</div>
-          <div class="stage-name">Divergent</div>
-          <div class="stage-desc">HC overturns sessions court. Richest training signal.</div>
-          <div class="stage-reward">target ≥ 0.60</div>
-        </div>
-        <div class="stage">
-          <div class="stage-num">4</div>
-          <div class="stage-name">Schema Drift</div>
-          <div class="stage-desc">IPC→BNSS remapping. Regional FIR formats. Patronus AI bonus.</div>
-          <div class="stage-reward">target ≥ 0.55</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
 </div>
 
 <script>
-const steps = [
-  {id:'s1',delay:800, result:'✓ IPC 420 → max 7 yrs → threshold 42 mo → served 8 mo → NOT eligible yet (19%) but approaching'},
-  {id:'s2',delay:1800,result:'✓ Found: Sanjay Chandra v. CBI (bail is rule), Satender Kumar Antil (default bail duty)'},
-  {id:'s3',delay:2800,result:'✓ 4 grounds for / 2 against → Conditional Bail recommended'},
-  {id:'s4',delay:3800,result:'✓ ₹25,000 surety — financially feasible for accused\'s income profile'},
-  {id:'s5',delay:4800,result:'✓ Memo submitted — Bail Granted, Low risk, 4 conditions specified'},
-];
+const BASE = '';
+let sessionId = null;
 
-const scores = [
-  {id:'b1',sc:'sc1',val:1.00,label:'1.00'},
-  {id:'b2',sc:'sc2',val:0.85,label:'0.85'},
-  {id:'b3',sc:'sc3',val:0.70,label:'0.70'},
-  {id:'b4',sc:'sc4',val:0.80,label:'0.80'},
-  {id:'b5',sc:'sc5',val:0.05,label:'0.05'},
-];
-
-let running=false;
-function runDemo(){
-  if(running)return;
-  running=true;
-  document.getElementById('agentStatus').textContent='Running';
-  document.getElementById('agentStatus').className='panel-badge badge-live';
-  steps.forEach(s=>{
-    const el=document.getElementById(s.id);
-    const dot=el.querySelector('.step-dot');
-    setTimeout(()=>{
-      el.classList.add('active');
-      dot.textContent='⟳';
-    },s.delay);
-    setTimeout(()=>{
-      el.classList.add('done');
-      dot.textContent='✓';
-      document.getElementById('r'+s.id.slice(1)).textContent=s.result;
-    },s.delay+700);
-  });
-  setTimeout(()=>{
-    document.getElementById('memo').classList.add('visible');
-    document.getElementById('agentStatus').textContent='Done';
-    animateRewards();
-  },6000);
-}
-
-function animateRewards(){
-  scores.forEach((s,i)=>{
-    setTimeout(()=>{
-      document.getElementById(s.id).style.width=(s.val*100)+'%';
-      animateCount(s.sc,0,s.val,800);
-    },i*150);
-  });
-  setTimeout(()=>{
-    const R=0.4*1.0+0.2*0.85+0.2*0.70+0.2*0.80-0.3*0.05;
-    animateCount('totalReward',0,R,1000,3);
-  },scores.length*150+200);
-}
-
-function animateCount(id,from,to,dur,dec=2){
-  const el=document.getElementById(id);
-  const start=performance.now();
-  function step(now){
-    const t=Math.min((now-start)/dur,1);
-    const ease=1-Math.pow(1-t,3);
-    el.textContent=(from+(to-from)*ease).toFixed(dec);
-    if(t<1)requestAnimationFrame(step);
+async function loadCase() {
+  try {
+    const res = await fetch(BASE + '/reset?stage=1', { method: 'POST' });
+    const data = await res.json();
+    sessionId = data.session_id;
+    const obs = data.observation;
+    document.getElementById('caseTitle').textContent = obs.case_title;
+    document.getElementById('caseMeta').innerHTML =
+      `<span class="tag court">${obs.court}</span>
+       <span class="tag crime">${obs.crime_type}</span>
+       <span class="tag">${obs.ipc_sections.join(', ')}</span>
+       <span class="tag">${obs.bail_type || 'Regular Bail'}</span>
+       <span class="tag">${obs.date}</span>`;
+    document.getElementById('chargeSheet').textContent = obs.charge_sheet;
+    document.getElementById('prosArgs').innerHTML = obs.prosecution_arguments.map(a =>
+      `<div class="arg-item"><span class="arg-bullet">+</span><span>${a}</span></div>`).join('');
+    document.getElementById('defArgs').innerHTML = obs.defence_arguments.map(a =>
+      `<div class="arg-item"><span class="arg-bullet">+</span><span>${a}</span></div>`).join('');
+  } catch(e) {
+    document.getElementById('chargeSheet').textContent = 'Error loading case: ' + e.message;
   }
-  requestAnimationFrame(step);
 }
 
-function resetDemo(){
-  running=false;
-  steps.forEach(s=>{
-    const el=document.getElementById(s.id);
-    el.classList.remove('active','done');
-    el.querySelector('.step-dot').textContent=s.id.slice(1);
-  });
-  document.getElementById('memo').classList.remove('visible');
-  document.getElementById('agentStatus').textContent='Waiting';
-  document.getElementById('agentStatus').className='panel-badge badge-pending';
-  scores.forEach(s=>{
-    document.getElementById(s.id).style.width='0';
-    document.getElementById(s.sc).textContent='0.00';
-  });
-  document.getElementById('totalReward').textContent='0.000';
+function log(msg, type='') {
+  const el = document.getElementById('toolLog');
+  const line = document.createElement('div');
+  line.className = 'log-line ' + type;
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
 }
+
+async function runDemo() {
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner">+</span> Running...';
+  document.getElementById('toolLog').innerHTML = '';
+  document.getElementById('rewardCard').classList.remove('visible');
+
+  log('POST /reset?stage=1', 'tool');
+  const res = await fetch(BASE + '/reset?stage=1', { method: 'POST' });
+  const data = await res.json();
+  sessionId = data.session_id;
+  log('Session ready: ' + sessionId.slice(0,8) + '...', 'ok');
+
+  await sleep(500);
+  log('POST /step: compute_statutory_eligibility', 'tool');
+  await postStep({ tool_name: 'compute_statutory_eligibility', sections_invoked: ['420'], max_sentence_years: 7.0, custody_months: 8.0, special_law_applicable: false });
+  log('Eligible: 8 months served (threshold 42 months)', 'ok');
+
+  await sleep(500);
+  log('POST /step: cross_reference_precedent', 'tool');
+  await postStep({ tool_name: 'cross_reference_precedent', query: 'default bail 436A no prior record', jurisdiction: 'Supreme Court' });
+  log('Precedents retrieved', 'ok');
+
+  await sleep(700);
+  log('POST /step: submit_memo (TERMINAL)', 'tool');
+  const final = await postStep({
+    tool_name: 'submit_memo',
+    flight_risk: 'Low',
+    flight_risk_justification: 'No prior record. Permanent Delhi resident. Family ties. No flight risk.',
+    statutory_eligible: true,
+    statutory_computation: 'IPC 420 max 7 yrs = 84 months, threshold 42 months, served 8 months',
+    grounds_for_bail: ['No prior criminal record', 'Permanent family ties in Delhi', 'Statutory eligibility', 'No tampering risk'],
+    grounds_against_bail: ['Investigation still pending'],
+    recommended_outcome: 'Bail Granted',
+    recommended_conditions: ['Personal bond Rs. 25,000 with surety', 'Weekly reporting', 'Surrender passport', 'Cooperate with investigation'],
+    confidence: 'High',
+  });
+
+  const info = final.info || {};
+  log('REWARD: ' + final.reward + ' | GT: ' + info.ground_truth_outcome, 'reward');
+
+  const card = document.getElementById('rewardCard');
+  card.classList.add('visible');
+  const agentOut = info.agent_outcome || '';
+  const vEl = document.getElementById('verdictBadge');
+  vEl.textContent = agentOut;
+  vEl.className = 'verdict ' + (agentOut.toLowerCase().includes('grant') ? 'granted' : 'denied');
+  document.getElementById('totalScore').textContent = Math.round(final.reward * 100) + ' / 100';
+  setBar('om', info.outcome_match);
+  setBar('fr', info.flight_risk_accuracy);
+  setBar('sa', info.statutory_accuracy);
+  setBar('ca', info.condition_appropriateness);
+  setBar('bp', info.bias_penalty);
+
+  btn.disabled = false;
+  btn.innerHTML = 'Run Again';
+}
+
+function setBar(key, val) {
+  val = val || 0;
+  document.getElementById('v-' + key).textContent = val.toFixed(2);
+  setTimeout(() => { document.getElementById('b-' + key).style.width = (val * 100) + '%'; }, 100);
+}
+
+async function postStep(action) {
+  const res = await fetch(BASE + '/step', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, action }),
+  });
+  return res.json();
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+window.addEventListener('load', loadCase);
 </script>
 </body>
 </html>

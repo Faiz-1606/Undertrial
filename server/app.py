@@ -4,11 +4,13 @@ Wraps UndertriAIEnvironment as an OpenEnv-compatible HTTP + WebSocket server.
 """
 
 import os
+from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 import json
 import uuid
+
 
 from .undertrial_environment import UndertriAIEnvironment
 
@@ -41,24 +43,24 @@ def get_or_create_env(session_id: str) -> UndertriAIEnvironment:
 # REST endpoints
 # ------------------------------------------------------------------
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def root():
-    return {
-        "name": "UndertriAI ⚖️",
-        "description": "OpenEnv-compliant RL environment for Indian bail decision support",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/health",
-        "tools": "/tools",
-        "usage": {
-            "reset": "POST /reset?stage=1",
-            "step":  "POST /step  {session_id, action}",
-            "state": "GET  /state?session_id=...",
-        },
-        "github": "https://github.com/Faiz-1606/Undertrial",
-        "space":  "https://huggingface.co/spaces/Draken1606/undertrial-ai",
-    }
-
+    """Serve the interactive demo UI."""
+    html_path = Path(__file__).parent.parent / "demo" / "index.html"
+    if html_path.exists():
+        return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+    # Fallback if demo file not found
+    return HTMLResponse(content="""
+    <html><body style="font-family:monospace;background:#0a0d1a;color:#e2e8f0;padding:40px">
+    <h1>UndertriAI ⚖️</h1>
+    <p>OpenEnv bail assessment environment is running.</p>
+    <ul>
+      <li><a href="/docs" style="color:#6366f1">Swagger Docs</a></li>
+      <li><a href="/health" style="color:#6366f1">Health Check</a></li>
+      <li><a href="/tools" style="color:#6366f1">Available Tools</a></li>
+    </ul>
+    </body></html>
+    """)
 
 @app.get("/health")
 def health():
