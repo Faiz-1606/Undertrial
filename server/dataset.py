@@ -155,6 +155,114 @@ class BailDataset:
                 "special_laws": "",
                 "schema_drift_eligible": False,
             },
+            {
+                "case_id": "DEMO003",
+                "case_title": "Priya Sharma vs State of Maharashtra",
+                "court": "Bombay High Court",
+                "date": "2023-08-15",
+                "charge_sheet": (
+                    "Priya Sharma, 26-year-old domestic worker, was arrested under IPC "
+                    "Section 498A (Cruelty by husband/relatives) following a matrimonial "
+                    "dispute. She has been in custody for 11 months. The lower court denied "
+                    "bail citing 'character concerns' — widely criticised as gender-biased. "
+                    "Two co-accused sisters-in-law were granted bail 3 months ago under "
+                    "identical charges (parity argument). Maximum sentence under 498A is 3 years."
+                ),
+                "ipc_sections": ["498A", "323"],
+                "crime_type": "Domestic Violence",
+                "bail_type": "Regular",
+                "prosecution_arguments": [
+                    "Accused allegedly instigated discord in the matrimonial home.",
+                    "Complainant (husband) fears further harassment if accused is released.",
+                ],
+                "defence_arguments": [
+                    "11 months custody on a 3-year max offence — threshold crossed.",
+                    "Co-accused sisters-in-law granted bail under identical charges — parity demands same treatment.",
+                    "Lower court's 'character' reasoning has no statutory basis — gender-discriminatory.",
+                    "Accused is primary caregiver of infant child currently in custody.",
+                ],
+                "legal_principles": [
+                    "Parity principle: similarly situated co-accused granted bail",
+                    "Section 436A default bail — custody exceeds half of max sentence",
+                ],
+                "documents_available": ["FIR Copy", "Charge Sheet", "Surety Affidavit", "Medical Report"],
+                "summary": "HC reversal: domestic worker denied bail on biased grounds; HC grants bail citing parity.",
+                "accused_profile": {
+                    "name": "Priya Sharma", "gender": "Female",
+                    "occupation": "Domestic worker", "region": "Maharashtra",
+                    "prior_cases": "None", "bail_type": "Regular",
+                },
+                "custody_months": 11.0,
+                "max_sentence_years": 3.0,
+                "ground_truth": {
+                    "outcome": "Bail Granted",
+                    "implicit_flight_risk": "Low",
+                    "judgment_reason": "Co-accused granted bail on parity. Custody exceeds half of max sentence. Lower court's 'character' reasoning is not a valid statutory ground.",
+                    "outcome_detail": "Bail granted with surety Rs. 10,000 and monthly reporting.",
+                    "bias_flag": True,
+                    "parity_argument_used": True,
+                },
+                "curriculum_stage": 3,
+                "landmark_case": False,
+                "bail_cancellation_case": True,
+                "region": "Maharashtra",
+                "special_laws": "",
+                "schema_drift_eligible": True,
+            },
+            {
+                "case_id": "DEMO004",
+                "case_title": "Mohammed Irfan vs State of Kerala (BNSS)",
+                "court": "Kerala High Court",
+                "date": "2024-03-10",
+                "charge_sheet": (
+                    "FIRST INFORMATION REPORT — Kerala Police | BNSS Section 173\n"
+                    "Mohammed Irfan, 32, school teacher, was arrested under BNS Section 318 "
+                    "(formerly IPC 420) and BNS Section 316 (formerly IPC 406) for "
+                    "misappropriating Rs. 1.2 lakh from a school parents' committee. "
+                    "He has been in custody for 6 months. No prior criminal record. "
+                    "Bail governed by Chapter XXXV BNSS 2023. Default bail under Section 479 BNSS."
+                ),
+                "ipc_sections": ["318", "316"],
+                "crime_type": "Cheating",
+                "bail_type": "Regular",
+                "prosecution_arguments": [
+                    "Misappropriation of school funds — breach of public trust.",
+                    "Investigation of digital records still ongoing.",
+                ],
+                "defence_arguments": [
+                    "BNS 318 max 7 years — Section 479 BNSS threshold is 42 months.",
+                    "Digital records already seized — no tampering risk.",
+                    "Permanent resident, employed teacher, first-time offence.",
+                ],
+                "legal_principles": [
+                    "Section 479 BNSS 2023 — default bail (replaces Section 436A CrPC)",
+                    "BNS Section 318 = former IPC 420",
+                ],
+                "documents_available": ["FIR Copy", "Charge Sheet", "Surety Affidavit", "Employment Proof"],
+                "summary": "BNSS schema drift case: IPC sections remapped to BNS, bail under new BNSS procedural framework.",
+                "accused_profile": {
+                    "name": "Mohammed Irfan", "gender": "Male",
+                    "occupation": "School teacher", "region": "Kerala",
+                    "prior_cases": "None", "bail_type": "Regular",
+                },
+                "custody_months": 6.0,
+                "max_sentence_years": 7.0,
+                "ground_truth": {
+                    "outcome": "Bail Granted",
+                    "implicit_flight_risk": "Low",
+                    "judgment_reason": "No flight risk. Permanent resident. Digital records secured. Eligible under Section 479 BNSS.",
+                    "outcome_detail": "Bail granted under BNSS Section 479. Surety Rs. 20,000. Monthly reporting.",
+                    "bias_flag": False,
+                    "parity_argument_used": False,
+                },
+                "curriculum_stage": 4,
+                "landmark_case": False,
+                "bail_cancellation_case": False,
+                "region": "Kerala",
+                "special_laws": "",
+                "schema_drift_eligible": True,
+                "schema_drifted": True,
+            },
         ]
         for ep in demo:
             stage = ep["curriculum_stage"]

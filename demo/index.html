@@ -55,9 +55,11 @@
     .stat-val { font-size: 18px; font-weight: 700; color: var(--indigo); }
     .stat-label { font-size: 10px; color: var(--muted); margin-top: 1px; }
 
-    .main { display: grid; grid-template-columns: 1fr 400px; height: calc(100vh - 120px); }
+    .main { display: grid; grid-template-columns: 1fr 380px; }
+    @media (max-width: 860px) { .main { grid-template-columns: 1fr; } }
 
-    .case-panel { padding: 24px 28px; overflow-y: auto; border-right: 1px solid var(--border); }
+    .case-panel { padding: 24px 28px; border-right: 1px solid var(--border); }
+    @media (max-width: 860px) { .case-panel { border-right: none; border-bottom: 1px solid var(--border); } }
     .section-title {
       font-size: 10px; font-weight: 600; letter-spacing: 1px;
       color: var(--muted); text-transform: uppercase; margin-bottom: 12px;
@@ -88,7 +90,7 @@
     .arg-bullet { color: var(--indigo); flex-shrink: 0; }
     .api-note { background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2); border-radius: 8px; padding: 10px; font-size: 10px; color: var(--muted); font-family: var(--mono); }
 
-    .sidebar { padding: 20px; overflow-y: auto; background: var(--surface); }
+    .sidebar { padding: 20px; background: var(--surface); }
     .run-btn {
       width: 100%; padding: 13px; border-radius: 8px; border: none; cursor: pointer;
       background: linear-gradient(135deg, var(--indigo), #4f46e5);
@@ -165,7 +167,7 @@
 
 <div class="main">
   <div class="case-panel">
-    <div class="section-title">Live Demo Case — Stage 1 (Landmark)</div>
+    <div class="section-title" id="stageLabel">Live Demo Case — Stage 1 (Landmark)</div>
     <div class="case-header">
       <div class="case-title" id="caseTitle">Loading case from environment...</div>
       <div class="case-meta" id="caseMeta"></div>
@@ -232,9 +234,12 @@
 const BASE = '';
 let sessionId = null;
 
-async function loadCase() {
+async function loadCase(stage) {
+  stage = stage || 1;
+  const labels = {1:'Stage 1 — Landmark', 2:'Stage 2 — Contested', 3:'Stage 3 — Reversal', 4:'Stage 4 — Schema Drift (BNSS)'};
+  document.getElementById('stageLabel').textContent = 'Live Demo Case — ' + (labels[stage] || 'Stage '+stage);
   try {
-    const res = await fetch(BASE + '/reset?stage=1', { method: 'POST' });
+    const res = await fetch(BASE + '/reset?stage=' + stage, { method: 'POST' });
     const data = await res.json();
     sessionId = data.session_id;
     const obs = data.observation;
@@ -265,14 +270,17 @@ function log(msg, type='') {
 }
 
 async function runDemo() {
+  const stages = [1,2,3,4];
+  const stage = stages[Math.floor(Math.random() * stages.length)];
+  await loadCase(stage);
   const btn = document.getElementById('runBtn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner">+</span> Running...';
   document.getElementById('toolLog').innerHTML = '';
   document.getElementById('rewardCard').classList.remove('visible');
 
-  log('POST /reset?stage=1', 'tool');
-  const res = await fetch(BASE + '/reset?stage=1', { method: 'POST' });
+  log('POST /reset?stage=' + stage, 'tool');
+  const res = await fetch(BASE + '/reset?stage=' + stage, { method: 'POST' });
   const data = await res.json();
   sessionId = data.session_id;
   log('Session ready: ' + sessionId.slice(0,8) + '...', 'ok');
@@ -338,7 +346,7 @@ async function postStep(action) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-window.addEventListener('load', loadCase);
+window.addEventListener('load', () => loadCase(1));
 </script>
 </body>
 </html>
