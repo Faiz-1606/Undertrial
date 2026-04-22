@@ -1,3 +1,21 @@
+---
+title: UndertriAI
+emoji: ⚖️
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 7860
+license: mit
+short_description: OpenEnv RL environment for Indian bail decision support
+tags:
+  - openenv
+  - legal-ai
+  - reinforcement-learning
+  - bail
+  - india
+  - grpo
+---
+
 # UndertriAI ⚖️
 
 **OpenEnv-compliant RL training environment for Indian bail decision support.**
