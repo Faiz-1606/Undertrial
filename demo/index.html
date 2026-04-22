@@ -297,18 +297,62 @@ async function runDemo() {
 
   await sleep(700);
   log('POST /step: submit_memo (TERMINAL)', 'tool');
-  const final = await postStep({
-    tool_name: 'submit_memo',
-    flight_risk: 'Low',
-    flight_risk_justification: 'No prior record. Permanent Delhi resident. Family ties. No flight risk.',
-    statutory_eligible: true,
-    statutory_computation: 'IPC 420 max 7 yrs = 84 months, threshold 42 months, served 8 months',
-    grounds_for_bail: ['No prior criminal record', 'Permanent family ties in Delhi', 'Statutory eligibility', 'No tampering risk'],
-    grounds_against_bail: ['Investigation still pending'],
-    recommended_outcome: 'Bail Granted',
-    recommended_conditions: ['Personal bond Rs. 25,000 with surety', 'Weekly reporting', 'Surrender passport', 'Cooperate with investigation'],
-    confidence: 'High',
-  });
+
+  // Stage-aware memo: each stage has the correct ground-truth recommendation
+  const memos = {
+    1: {
+      tool_name: 'submit_memo',
+      flight_risk: 'Low',
+      flight_risk_justification: 'No prior record. Permanent Delhi resident. Family ties. No flight risk indicators.',
+      statutory_eligible: true,
+      statutory_computation: 'IPC 420 max 7 yrs = 84 months, threshold 42 months, served 8 months',
+      grounds_for_bail: ['No prior criminal record', 'Permanent family ties in Delhi', 'Statutory eligibility', 'No tampering risk'],
+      grounds_against_bail: ['Investigation still pending'],
+      recommended_outcome: 'Bail Granted',
+      recommended_conditions: ['Personal bond Rs. 25,000 with surety', 'Weekly reporting', 'Surrender passport'],
+      confidence: 'High',
+    },
+    2: {
+      tool_name: 'submit_memo',
+      flight_risk: 'High',
+      flight_risk_justification: 'Organized crime nexus, resources to abscond, two prior cases including Arms Act, three eyewitnesses at risk.',
+      statutory_eligible: false,
+      statutory_computation: 'IPC 302 = life imprisonment, no threshold applicable under Section 436A',
+      grounds_for_bail: ['14 months in prolonged detention'],
+      grounds_against_bail: ['Gravity of offence: murder with life imprisonment', 'Organized criminal syndicate links', 'Three eyewitnesses may be intimidated', 'Two prior cases — repeat offender profile'],
+      recommended_outcome: 'Bail Denied',
+      recommended_conditions: [],
+      confidence: 'High',
+    },
+    3: {
+      tool_name: 'submit_memo',
+      flight_risk: 'Low',
+      flight_risk_justification: 'Permanent local resident, infant child caregiver, no prior record, no abscondence risk.',
+      statutory_eligible: true,
+      statutory_computation: 'IPC 498A max 3 yrs = 36 months, threshold 18 months, served 11 months (approaching threshold)',
+      grounds_for_bail: ['Parity: co-accused sisters-in-law granted bail under identical charges', 'Lower court gender-biased character reasoning has no statutory basis', 'Infant child dependent on accused', 'No flight risk'],
+      grounds_against_bail: ['Complainant fears further harassment'],
+      recommended_outcome: 'Bail Granted',
+      recommended_conditions: ['Surety Rs. 10,000', 'Monthly police station reporting', 'No contact with complainant'],
+      confidence: 'High',
+    },
+    4: {
+      tool_name: 'submit_memo',
+      flight_risk: 'Low',
+      flight_risk_justification: 'Employed teacher, permanent Kerala resident, community ties, no abscondence indicators.',
+      statutory_eligible: true,
+      statutory_computation: 'BNS 318 (IPC 420) max 7 yrs = 84 months, BNSS Section 479 threshold 42 months, served 6 months — not yet eligible but no flight risk',
+      grounds_for_bail: ['No prior criminal record', 'Digital records already seized — tampering impossible', 'Permanent employment and local community ties', 'Cooperation with investigation'],
+      grounds_against_bail: ['Investigation of digital records ongoing'],
+      recommended_outcome: 'Bail Granted',
+      recommended_conditions: ['Personal bond Rs. 20,000 with surety', 'Monthly reporting under BNSS Section 479', 'Surrender digital devices', 'Cannot leave district without permission'],
+      confidence: 'High',
+    },
+  };
+
+  const memo = memos[stage] || memos[1];
+  const final = await postStep(memo);
+
 
   const info = final.info || {};
   log('REWARD: ' + final.reward + ' | GT: ' + info.ground_truth_outcome, 'reward');
