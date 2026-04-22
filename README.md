@@ -3,7 +3,7 @@
 **OpenEnv-compliant RL training environment for Indian bail decision support.**
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
-[![HuggingFace](https://img.shields.io/badge/🤗-Spaces-yellow)](https://huggingface.co/spaces/openenv/undertrial-ai)
+[![HuggingFace](https://img.shields.io/badge/🤗-Spaces-yellow)](https://huggingface.co/spaces/Draken1606/undertrial-ai)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
@@ -62,7 +62,7 @@ UndertriAIEnvironment (OpenEnv-compliant FastAPI server)
 
 ```bash
 pip install openenv-core
-pip install git+https://huggingface.co/spaces/openenv/undertrial-ai
+pip install git+https://huggingface.co/spaces/Draken1606/undertrial-ai
 ```
 
 ### 2. Use the environment
@@ -70,7 +70,7 @@ pip install git+https://huggingface.co/spaces/openenv/undertrial-ai
 ```python
 from undertrial_ai import UndertriAIEnv, SubmitMemoAction
 
-async with UndertriAIEnv(base_url="https://openenv-undertrial-ai.hf.space") as env:
+async with UndertriAIEnv(base_url="https://draken1606-undertrial-ai.hf.space") as env:
     obs = await env.reset(stage=1)
     print(obs.charge_sheet)       # The case facts
     print(obs.ipc_sections)       # Sections invoked
