@@ -41,9 +41,29 @@ def get_or_create_env(session_id: str) -> UndertriAIEnvironment:
 # REST endpoints
 # ------------------------------------------------------------------
 
+@app.get("/")
+def root():
+    return {
+        "name": "UndertriAI ⚖️",
+        "description": "OpenEnv-compliant RL environment for Indian bail decision support",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health",
+        "tools": "/tools",
+        "usage": {
+            "reset": "POST /reset?stage=1",
+            "step":  "POST /step  {session_id, action}",
+            "state": "GET  /state?session_id=...",
+        },
+        "github": "https://github.com/Faiz-1606/Undertrial",
+        "space":  "https://huggingface.co/spaces/Draken1606/undertrial-ai",
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "env": "UndertriAI", "version": "1.0.0"}
+
 
 
 @app.post("/reset")
