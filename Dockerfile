@@ -14,8 +14,9 @@ RUN pip install --no-cache-dir --upgrade -r requirements.txt
 # Copy full package source
 COPY --chown=user . /app
 
-# Install the undertrial_ai package itself
-RUN pip install --no-cache-dir -e .
+# Install the undertrial_ai package (regular install, not editable — works in Docker)
+RUN pip install --no-cache-dir --upgrade .
+
 
 # Episode data directory (falls back to built-in demo episodes if empty)
 ENV UNDERTRIAL_EPISODES_DIR=/app/data/episodes
