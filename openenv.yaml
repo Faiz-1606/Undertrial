@@ -1,0 +1,44 @@
+name: undertrial-ai
+version: "1.0.0"
+description: "OpenEnv-compliant RL environment for Indian bail decision support"
+author: "UndertriAI Team"
+tags:
+  - legal-ai
+  - india
+  - bail
+  - grpo
+  - world-modeling
+  - patronus-schema-drift
+
+actions:
+  - name: request_document
+    description: Request a missing case document
+  - name: flag_inconsistency
+    description: Flag a legal inconsistency in the charge or prosecution argument
+  - name: cross_reference_precedent
+    description: Retrieve a relevant landmark precedent
+  - name: compute_statutory_eligibility
+    description: Check default bail eligibility under IPC/BNSS
+  - name: assess_surety
+    description: Evaluate financial viability of proposed surety
+  - name: classify_bail_type
+    description: Determine bail type from grounds for/against
+  - name: submit_memo
+    description: "TERMINAL — Submit structured bail assessment memo"
+
+reward:
+  formula: "0.4*outcome_match + 0.2*flight_risk_acc + 0.2*statutory_acc + 0.2*condition_acc - 0.3*bias_score"
+  range: [0.0, 1.0]
+  terminal_action: submit_memo
+
+curriculum:
+  stages: 4
+  stage_1: "Landmark cases — legally clear-cut"
+  stage_2: "Standard contested cases"
+  stage_3: "Bail cancellation / reversal cases"
+  stage_4: "Schema drift (IPC→BNSS, regional FIR formats)"
+
+deployment:
+  platform: huggingface-spaces
+  sdk: docker
+  port: 7860
