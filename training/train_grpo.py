@@ -327,13 +327,17 @@ def combined_reward(
             # Use the authoritative server functions
             o  = compute_outcome_match(parsed["recommended_outcome"], gt)
             fr = compute_flight_risk_accuracy(parsed["flight_risk"], gt)
-            s  = compute_statutory_accuracy(parsed, ep)
+            s  = compute_statutory_accuracy(
+                parsed["statutory_eligible"],
+                parsed["statutory_computation"],
+                ep,
+            )
             ca = compute_condition_score(
                 parsed["recommended_outcome"],
                 parsed.get("conditions", []),
                 gt,
             )
-            b  = _server_bias(parsed, ep)
+            b  = _server_bias(parsed["recommended_outcome"], ep)
         else:
             # Local fallback
             o  = reward_outcome_match([comp], [ep])[0]

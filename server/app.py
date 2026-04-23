@@ -208,7 +208,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             elif cmd == "state":
                 await websocket.send_text(json.dumps({
                     "type": "state",
-                    "state": env.state(),
+                    "state": env.state,
                 }))
 
     except WebSocketDisconnect:
