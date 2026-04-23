@@ -13,8 +13,8 @@ build/
 venv/
 env/
 
-# Data (too large for HF Space — load separately)
-data/episodes/*.jsonl
+# Data (small episode JSONL files are committed for HF Spaces deployment)
+# data/episodes/*.jsonl
 
 # Model outputs
 output/
