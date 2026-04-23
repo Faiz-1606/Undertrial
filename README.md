@@ -14,162 +14,209 @@ tags:
   - bail
   - india
   - grpo
+  - bias-mitigation
 ---
 
 # UndertriAI ⚖️
 
 **OpenEnv-compliant RL training environment for Indian bail decision support.**
 
-[![OpenEnv](https://img.shields.io/badge/OpenEnv-compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
-[![HuggingFace](https://img.shields.io/badge/🤗-Spaces-yellow)](https://huggingface.co/spaces/Draken1606/undertrial-ai)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![OpenEnv](https://img.shields.io/badge/OpenEnv-compatible-6366f1)](https://github.com/meta-pytorch/OpenEnv)
+[![Live Demo](https://img.shields.io/badge/🤗_Space-Live_Demo-yellow)](https://huggingface.co/spaces/Draken1606/undertrial-ai)
+[![Swagger](https://img.shields.io/badge/API-Swagger_Docs-green)](https://draken1606-undertrial-ai.hf.space/docs)
+[![License: MIT](https://img.shields.io/badge/License-MIT-gray)](LICENSE)
+
+> **[▶ Try the Live Demo](https://huggingface.co/spaces/Draken1606/undertrial-ai)** — click "Run Bail Assessment" to see the environment in action.
 
 ---
 
 ## The Problem
 
-76% of India's 5.7 lakh prisoners are **undertrials** — unconvicted people awaiting bail hearings.  
-A subordinate court judge handles **80–100 bail hearings per day** — roughly **3 minutes per case**.
+**76% of India's 5.7 lakh prisoners are undertrials** — unconvicted people awaiting bail hearings, many of whom cannot afford lawyers.
 
-In that window a judge must read the charge, assess flight risk, evaluate custody duration, consider financial standing, and cross-reference precedent. In practice, decisions are heavily influenced by whichever lawyer speaks loudest.
+A subordinate court judge handles **80–100 bail hearings per day** — roughly **3 minutes per case**. In that window they must read the charge sheet, assess flight risk, evaluate custody duration against the statutory threshold, and check for parity with co-accused. In practice, outcomes are inconsistent and empirically biased against poor, lower-caste, and minority accused.
 
-**Result:** Poor undertrials remain incarcerated for years on offences carrying 2-year maximum sentences. This is not anecdotal — it is a structural failure at scale.
+**This is not anecdotal — it is structural.** The Supreme Court in Satender Kumar Antil (2022) explicitly noted the crisis.
 
 ---
 
 ## What UndertriAI Does
 
-UndertriAI trains an LLM agent to do what a thorough senior judge would do:
+UndertriAI is an **OpenEnv-compliant RL training environment** that teaches an LLM to reason like a careful, consistent, and unbiased judicial clerk:
 
-- Read the full case
-- Apply the statute (IPC and BNSS 2023)
-- Cross-reference landmark precedents
-- Produce a **consistent recommendation regardless of who is asking**
-
----
-
-## Environment Architecture
-
-```
-Agent (Qwen2.5-7B-Instruct, fine-tuned via GRPO)
-        │
-        │  6 tool calls + 1 terminal action
-        ▼
-UndertriAIEnvironment (OpenEnv-compliant FastAPI server)
-        │
-        ├── request_document
-        ├── flag_inconsistency
-        ├── cross_reference_precedent
-        ├── compute_statutory_eligibility
-        ├── assess_surety
-        ├── classify_bail_type
-        └── submit_memo  ← triggers reward computation
-                │
-                ▼
-        Reward Engine
-        R = 0.4×outcome_match + 0.2×flight_risk_acc
-          + 0.2×statutory_acc + 0.2×condition_acc
-          − 0.3×bias_score
-```
+1. Read the full charge sheet and arguments
+2. Invoke legal tools (statutory eligibility, precedent lookup, surety assessment)
+3. Produce a structured bail memo with explicit reasoning
+4. Get rewarded based on agreement with real High Court decisions — with an **explicit bias penalty**
 
 ---
 
-## Quick Start
+## Environment Design
 
-### 1. Install
+### API Endpoints
 
-```bash
-pip install openenv-core
-pip install git+https://huggingface.co/spaces/Draken1606/undertrial-ai
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/reset?stage=1` | Start a new episode (curriculum stage 1–4) |
+| `POST` | `/step` | Submit a tool call or final memo |
+| `GET` | `/state?session_id=...` | Inspect current episode state |
+| `GET` | `/health` | Health check |
+| `GET` | `/tools` | List available tools |
+| `WS` | `/ws/{session_id}` | WebSocket real-time feed |
+
+### Tools Available to the Agent
+
+| Tool | Purpose |
+|---|---|
+| `compute_statutory_eligibility` | Calculate custody vs threshold for IPC/BNSS sections |
+| `cross_reference_precedent` | Look up landmark HC/SC decisions |
+| `assess_surety` | Evaluate surety bond appropriateness |
+| `classify_bail_type` | Determine regular / anticipatory / default bail |
+| `request_document` | Request additional case documents |
+| `flag_inconsistency` | Flag contradictions in the charge sheet |
+| `submit_memo` | **Terminal action** — submit final bail recommendation |
+
+### 4-Stage Curriculum
+
+| Stage | Focus | Cases |
+|---|---|---|
+| 1 | Landmark cases (clear-cut eligibility) | ~40 |
+| 2 | Contested cases (murder, repeat offenders) | ~1,100 |
+| 3 | Bias-reversal cases (HC overturning biased lower courts) | ~30 |
+| 4 | BNSS schema drift (IPC → BNS remapping, 2023 reform) | ~50 |
+
+---
+
+## Reward Function
+
+```
+R = 0.4 × outcome_match
+  + 0.2 × flight_risk_accuracy
+  + 0.2 × statutory_accuracy
+  + 0.2 × condition_appropriateness
+  − 0.3 × bias_penalty
 ```
 
-### 2. Use the environment
+All components are **fully deterministic and rule-based** — no LLM-as-judge.
 
-```python
-from undertrial_ai import UndertriAIEnv, SubmitMemoAction
+| Component | Signal | Details |
+|---|---|---|
+| **Outcome Match** | 0.0 / 0.8 / 1.0 | Exact, directional, or wrong vs HC decision |
+| **Flight Risk** | 0–1 | Ordinal distance to ground-truth risk level |
+| **Statutory** | 0–1 | IPC/BNSS section, sentence threshold, custody duration |
+| **Conditions** | 0–1 | Appropriate bail conditions for crime/risk profile |
+| **Bias Penalty** | −0.3 | Fired if parity argument ignored in bias-flagged cases |
 
-async with UndertriAIEnv(base_url="https://draken1606-undertrial-ai.hf.space") as env:
-    obs = await env.reset(stage=1)
-    print(obs.charge_sheet)       # The case facts
-    print(obs.ipc_sections)       # Sections invoked
-    print(obs.prosecution_arguments)
+### Anti-Reward-Hacking Design
 
-    result = await env.step(SubmitMemoAction(
-        flight_risk="Low",
-        flight_risk_justification="Accused has permanent residence and no prior record.",
-        statutory_eligible=True,
-        statutory_computation="IPC 420 → max 7 years → threshold 42 months → served 8 months",
-        grounds_for_bail=["No flight risk", "Family ties", "Custody approaching threshold"],
-        grounds_against_bail=["Investigation pending"],
-        recommended_outcome="Bail Granted",
-        recommended_conditions=["Surety of ₹25,000", "Weekly court reporting", "Surrender passport"],
-    ))
-    print(result.reward)    # e.g. 0.78
-    print(result.info)      # Full reward breakdown
-```
+- 5 independent reward signals (harder to simultaneously game all)
+- `GenerationInspectionCallback` prints raw completions every 25 training steps
+- Bias penalty operates as a separate signal, not folded into outcome
+- Schema drift (Stage 4) tests adaptability, not pattern memorisation
 
-### 3. Prepare your dataset
+---
+
+## Training
+
+Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-3B-Instruct`.
 
 ```bash
-python data/prepare_dataset.py \
-    --csv /path/to/indian_bail_judgments.csv \
-    --output ./data/episodes
-```
-
-### 4. Train with GRPO
-
-```bash
+# Run with before/after eval and results.json
 python training/train_grpo.py \
-    --episodes_dir ./data/episodes \
-    --stage 1 \
-    --steps 200
+  --episodes_dir ./data/episodes \
+  --stage 1 \
+  --steps 200 \
+  --eval_after
+```
+
+Or use the Colab notebook: [`training/UndertriAI_GRPO_Training.ipynb`](training/UndertriAI_GRPO_Training.ipynb)
+
+### Training Architecture
+
+```
+Episode Dataset (JSONL)
+        ↓
+  Format as chat prompt
+        ↓
+  Qwen2.5 generates 6 rollouts
+        ↓
+  XML parser extracts structured fields
+        ↓
+  server/reward.py scores each rollout (deterministic)
+        ↓
+  GRPO updates model weights
+        ↓
+  GenerationInspectionCallback logs samples every 25 steps
 ```
 
 ---
 
-## Reward Formula
+## Installation
 
-| Component | Weight | Description |
-|-----------|--------|-------------|
-| Outcome Match | 40% | Agent recommendation vs. High Court decision |
-| Flight Risk Accuracy | 20% | Flight risk vs. implicit appellate reasoning |
-| Statutory Accuracy | 20% | Correct eligibility computation and section citation |
-| Condition Appropriateness | 20% | Conditions consistent with appellate order |
-| **Bias Penalty** | −30% | Demographic variance penalty (λ = 0.3) |
+```bash
+# Clone and install
+git clone https://github.com/Faiz-1606/Undertrial
+cd Undertrial
+pip install -e .
 
----
+# Use the environment client
+from client import UndertriAIEnv
+env = UndertriAIEnv(base_url="https://draken1606-undertrial-ai.hf.space")
+obs = env.reset(stage=1)
+```
 
-## Curriculum Stages
-
-| Stage | Cases | Description |
-|-------|-------|-------------|
-| 1 | Landmark cases | Legally clear-cut, near-automatic outcomes |
-| 2 | Standard contested | Sessions and HC agree |
-| 3 | Reversal cases | `bail_cancellation_case=True` — richest signal |
-| 4 | Schema drift | IPC→BNSS remapping, regional FIR formats (Patronus AI bonus) |
-
----
-
-## Bonus Tracks
-
-- **Patronus AI** — Schema Drift: Stage 4 applies IPC→BNSS section remapping and injects regional FIR format headers (Tamil Nadu, Kerala, Punjab, Maharashtra, Assam)
-- **Theme #4** — Self-Improvement: Counterfactual case generator creates synthetic variants for expanded training signal
+Or connect directly via the OpenEnv client:
+```python
+from openenv import from_hub
+env = from_hub("Draken1606/undertrial-ai")
+```
 
 ---
 
-## Dataset
-
-1,200 real Indian High Court bail judgments across 10+ states.  
-736 Granted / 464 Rejected. Pre-labeled with `bias_flag` and `parity_argument_used`.
-
----
-
-## Citation
+## Project Structure
 
 ```
-@misc{undertrial-ai-2025,
-  title  = {UndertriAI: Bail Decision Support Environment for LLM Training},
-  year   = {2025},
-  note   = {OpenEnv-compatible environment, Meta PyTorch Hackathon}
-}
+undertrial_ai/
+├── server/
+│   ├── app.py                  # FastAPI routes
+│   ├── undertrial_environment.py  # Environment logic
+│   ├── reward.py               # 5-component deterministic reward
+│   ├── dataset.py              # Curriculum-staged episode loader
+│   └── schema_drift.py         # IPC → BNSS remapping (Stage 4)
+├── training/
+│   ├── train_grpo.py           # GRPO training script
+│   └── UndertriAI_GRPO_Training.ipynb  # Colab notebook
+├── data/
+│   └── episodes/               # 1,200 HC judgments across 4 stages
+├── demo/
+│   └── index.html              # Interactive demo UI
+├── client.py                   # UndertriAIEnv HTTP client
+├── models.py                   # Pydantic action/observation schemas
+└── Dockerfile                  # HF Spaces deployment
 ```
+
+---
+
+## Data
+
+1,200 Indian High Court bail judgments (2018–2024) processed into curriculum episodes covering:
+- Delhi, Bombay, Allahabad, Madras, Kerala, and Calcutta HCs
+- Crimes from IPC 420 (cheating) to IPC 302 (murder)
+- Cases annotated with ground-truth outcome, flight risk, bias flags, and parity arguments
+
+---
+
+## Why This Matters
+
+> *"Bail is the rule, jail is the exception."*  
+> — Supreme Court of India, Satender Kumar Antil v. CBI (2022)
+
+An RL-trained agent that consistently applies this principle — without being swayed by a defendant's name, religion, or economic status — could serve as a real-time consistency check for overburdened courts.
+
+This isn't a tool to replace judges. It's a mirror that forces the system to confront its own inconsistencies.
+
+---
+
+## Team
+
+Built for the **OpenEnv Hackathon, April 2026** by **Faiz (Draken1606)**.
