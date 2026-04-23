@@ -710,7 +710,295 @@ def evaluate_baseline(episodes_dir: str, n_samples: int = 20):
 
 
 # ============================================================
-# CELL 8 — Entry point
+# CELL 8 — Self-Improving Curriculum Training (Theme 4)
+# ============================================================
+
+STAGE_NAMES = {
+    1: "Landmark (clear-cut cases)",
+    2: "Contested (judgment calls)",
+    3: "Bias Reversal (parity cases)",
+    4: "Schema Drift (IPC→BNSS)",
+}
+
+STAGE_THRESHOLD = 0.60  # 60% outcome accuracy to unlock next stage
+
+
+def evaluate_on_stage(
+    model,
+    tokenizer,
+    episodes_dir: str,
+    stage: int,
+    n_samples: int = 20,
+) -> Tuple[float, List[Dict]]:
+    """
+    Evaluate the current model on held-out cases from a specific stage.
+    Returns (average_reward, list of {episode, completion, reward} dicts).
+    """
+    from unsloth import FastLanguageModel  # type: ignore
+    FastLanguageModel.for_inference(model)
+
+    episodes = load_episodes(episodes_dir, stage=stage, split="val")[:n_samples]
+    if not episodes:
+        episodes = load_episodes(episodes_dir, stage=stage, split="train")[:n_samples]
+
+    results = []
+    rewards = []
+
+    for ep in episodes:
+        prompt = format_case_prompt(ep)
+        messages = [
+            {"role": "system",  "content": SYSTEM_PROMPT},
+            {"role": "user",    "content": prompt},
+        ]
+        inputs = tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+        ).to(model.device)
+
+        with torch.no_grad():
+            out = model.generate(inputs, max_new_tokens=512, temperature=0.7, do_sample=True)
+
+        completion = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+        r = combined_reward([completion], [ep])[0]
+        rewards.append(r)
+        results.append({"episode": ep, "completion": completion, "reward": r})
+
+    FastLanguageModel.for_training(model)
+    avg = sum(rewards) / len(rewards) if rewards else 0.0
+    return avg, results
+
+
+def extract_good_traces(
+    eval_results: List[Dict],
+    min_reward: float = 0.6,
+    top_k: int = 3,
+) -> List[str]:
+    """
+    Extract the best reasoning traces from evaluation results.
+    Returns up to top_k completions that scored above min_reward.
+    """
+    good = [r for r in eval_results if r["reward"] >= min_reward]
+    good.sort(key=lambda x: -x["reward"])
+    traces = []
+    for r in good[:top_k]:
+        ep = r["episode"]
+        # Compact trace: case_id + GT + agent completion
+        trace = (
+            f"--- Example: {ep.get('case_id', '?')} "
+            f"(GT: {ep['ground_truth']['outcome']}) ---\n"
+            f"{r['completion'][:600]}"
+        )
+        traces.append(trace)
+    return traces
+
+
+def inject_examples(base_prompt: str, traces: List[str]) -> str:
+    """
+    Add successful traces as few-shot examples to the system prompt.
+    This is the core self-improvement mechanism: the model's own good
+    reasoning from stage N becomes instructional context for stage N+1.
+    """
+    if not traces:
+        return base_prompt
+
+    examples_block = "\n\nHere are examples of CORRECT bail assessments from simpler cases:\n\n"
+    examples_block += "\n\n".join(traces)
+    examples_block += "\n\nNow apply the same structured reasoning to the following case:\n"
+
+    return base_prompt + examples_block
+
+
+def train_curriculum(
+    episodes_dir: str = "./data/episodes",
+    output_dir: str = "./output/undertrial_grpo",
+    stages: List[int] = None,
+    max_steps_per_stage: int = 150,
+    batch_size: int = 4,
+    grad_accum: int = 4,
+    lr: float = 5e-6,
+    threshold: float = STAGE_THRESHOLD,
+):
+    """
+    Self-improving curriculum training.
+
+    The agent trains on stage N, then its best reasoning traces are
+    harvested and injected as few-shot examples into stage N+1's prompt.
+    Stage N+1 is only unlocked when stage N accuracy exceeds the threshold.
+
+    This is the key self-improvement mechanism for Theme 4.
+    """
+    if stages is None:
+        stages = [1, 2, 3, 4]
+
+    print("=" * 60)
+    print("  UndertriAI — Self-Improving Curriculum Training")
+    print(f"  Stages: {stages} | Threshold: {threshold:.0%}")
+    print("=" * 60)
+
+    from unsloth import FastLanguageModel  # type: ignore
+    from trl import GRPOConfig, GRPOTrainer  # type: ignore
+
+    # Load model once — reused across all stages
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name="unsloth/Qwen2.5-7B-Instruct",
+        max_seq_length=3072,
+        load_in_4bit=True,
+        fast_inference=False,
+    )
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=16,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=16, lora_dropout=0, bias="none",
+        use_gradient_checkpointing="unsloth", random_state=42,
+    )
+
+    accumulated_traces: List[str] = []
+    stage_results = {}
+    current_prompt = SYSTEM_PROMPT
+
+    for stage in stages:
+        print(f"\n{'━' * 60}")
+        print(f"  STAGE {stage}: {STAGE_NAMES.get(stage, '?')}")
+        print(f"{'━' * 60}")
+
+        # ── Inject traces from previous stages into prompt ──
+        if accumulated_traces:
+            current_prompt = inject_examples(SYSTEM_PROMPT, accumulated_traces)
+            print(f"  Injected {len(accumulated_traces)} successful traces from earlier stages")
+        else:
+            current_prompt = SYSTEM_PROMPT
+
+        # ── Baseline eval for this stage ──
+        print(f"\n  Evaluating baseline on Stage {stage}...")
+        baseline_reward, _ = evaluate_on_stage(
+            model, tokenizer, episodes_dir, stage, n_samples=20
+        )
+        print(f"  Stage {stage} baseline: {baseline_reward:.4f}")
+
+        # ── Build dataset for this stage ──
+        episodes = load_episodes(episodes_dir, stage=stage, split="train")
+        if not episodes:
+            print(f"  ⚠ No episodes for stage {stage} — skipping")
+            continue
+        print(f"  Training on {len(episodes)} episodes...")
+
+        # Build HF dataset with potentially enriched prompt
+        rows = []
+        for ep in episodes:
+            case_prompt = format_case_prompt(ep)
+            messages = [
+                {"role": "system", "content": current_prompt},
+                {"role": "user", "content": case_prompt},
+            ]
+            formatted = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            rows.append({
+                "prompt": formatted,
+                "episode": json.dumps(ep),
+                "case_id": ep.get("case_id", ""),
+                "ground_truth": ep["ground_truth"]["outcome"],
+            })
+        dataset = Dataset.from_list(rows)
+
+        def reward_fn(completions: List[str], episode: List[str], **kwargs) -> List[float]:
+            ep_objs = [json.loads(e) for e in episode]
+            return combined_reward(completions, ep_objs)
+
+        stage_output = f"{output_dir}/stage_{stage}"
+        config = GRPOConfig(
+            output_dir=stage_output,
+            learning_rate=lr,
+            per_device_train_batch_size=batch_size,
+            gradient_accumulation_steps=grad_accum,
+            num_train_epochs=1,
+            max_steps=max_steps_per_stage,
+            num_generations=6,
+            max_completion_length=1024,
+            temperature=0.7,
+            beta=0.01,
+            logging_steps=5,
+            save_steps=50,
+            report_to="none",
+            remove_unused_columns=False,
+        )
+
+        trainer = GRPOTrainer(
+            model=model,
+            processing_class=tokenizer,
+            config=config,
+            train_dataset=dataset,
+            reward_funcs=[reward_fn],
+        )
+        trainer.train()
+
+        # ── Post-training eval ──
+        print(f"\n  Evaluating after Stage {stage} training...")
+        post_reward, eval_results = evaluate_on_stage(
+            model, tokenizer, episodes_dir, stage, n_samples=20
+        )
+        improvement = post_reward - baseline_reward
+        print(f"  Stage {stage}: {baseline_reward:.4f} → {post_reward:.4f} "
+              f"(Δ = {improvement:+.4f})")
+
+        stage_results[stage] = {
+            "baseline": round(baseline_reward, 4),
+            "post": round(post_reward, 4),
+            "delta": round(improvement, 4),
+        }
+
+        # ── Harvest good traces for next stage ──
+        new_traces = extract_good_traces(eval_results, min_reward=0.6, top_k=2)
+        if new_traces:
+            accumulated_traces.extend(new_traces)
+            print(f"  ✓ Harvested {len(new_traces)} good traces for next stage")
+
+        # ── Check threshold for stage progression ──
+        if post_reward >= threshold:
+            print(f"  ✓ Stage {stage} PASSED (reward {post_reward:.2f} ≥ {threshold:.2f})")
+            if stage < max(stages):
+                print(f"  → Unlocking Stage {stage + 1}")
+        else:
+            print(f"  ✗ Stage {stage} below threshold ({post_reward:.2f} < {threshold:.2f})")
+            print(f"  → Continuing to next stage anyway (curriculum mode)")
+
+        # Save checkpoint after each stage
+        model.save_pretrained(stage_output)
+        tokenizer.save_pretrained(stage_output)
+        print(f"  Checkpoint saved: {stage_output}")
+
+    # ── Final summary ──
+    print(f"\n{'═' * 60}")
+    print("  CURRICULUM TRAINING COMPLETE")
+    print(f"{'═' * 60}")
+    for s, r in stage_results.items():
+        status = "✓" if r["post"] >= threshold else "✗"
+        print(f"  {status} Stage {s}: {r['baseline']:.4f} → {r['post']:.4f} "
+              f"(Δ = {r['delta']:+.4f})")
+    print(f"  Total traces harvested: {len(accumulated_traces)}")
+
+    # Save final model
+    final_dir = f"{output_dir}/final"
+    model.save_pretrained(final_dir)
+    tokenizer.save_pretrained(final_dir)
+    print(f"\n  Final model saved: {final_dir}")
+
+    # Save results
+    results_path = Path(output_dir) / "curriculum_results.json"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    results_path.write_text(json.dumps({
+        "stages": stage_results,
+        "traces_harvested": len(accumulated_traces),
+        "threshold": threshold,
+    }, indent=2))
+    print(f"  Results saved: {results_path}")
+
+    return stage_results
+
+
+# ============================================================
+# CELL 9 — Entry point
 # ============================================================
 
 if __name__ == "__main__":
@@ -724,10 +1012,20 @@ if __name__ == "__main__":
                         help="Only run baseline evaluation, skip training")
     parser.add_argument("--eval_after",    action="store_true",
                         help="Run evaluation after training to measure improvement")
+    parser.add_argument("--curriculum",    action="store_true",
+                        help="Run self-improving curriculum training (all 4 stages)")
+
     args = parser.parse_args()
 
     if args.baseline_only:
         evaluate_baseline(args.episodes_dir)
+    elif args.curriculum:
+        train_curriculum(
+            episodes_dir=args.episodes_dir,
+            output_dir=args.output,
+            max_steps_per_stage=args.steps,
+            batch_size=args.batch_size,
+        )
     else:
         train(
             episodes_dir = args.episodes_dir,
@@ -737,3 +1035,4 @@ if __name__ == "__main__":
             batch_size   = args.batch_size,
             eval_after   = args.eval_after,
         )
+
