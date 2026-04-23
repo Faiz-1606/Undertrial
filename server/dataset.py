@@ -43,7 +43,9 @@ class BailDataset:
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     episodes = [json.loads(line) for line in f if line.strip()]
-                random.shuffle(episodes)
+                # Do NOT shuffle here: keeps episode order deterministic so
+                # seed=0 (demo) always returns the same known first episode.
+                # Training diversity comes from sequential _episode_index iteration.
                 self._episodes[stage] = episodes
                 print(f"[BailDataset] Stage {stage}: {len(episodes)} episodes loaded from {path}")
 
