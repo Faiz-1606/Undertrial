@@ -31,7 +31,7 @@ except ImportError:
         info: dict = {}
 
 from ..models import (
-    AccusedProfile, CaseObservation, StepResult,
+    AccusedProfile, CaseObservation,
     BailAction,
     RequestDocumentAction, FlagInconsistencyAction, CrossReferencePrecedentAction,
     ComputeStatutoryEligibilityAction, AssessSuretyAction, ClassifyBailTypeAction,

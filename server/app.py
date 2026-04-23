@@ -98,16 +98,23 @@ def step(payload: dict):
     from ..models import (
         RequestDocumentAction, FlagInconsistencyAction,
         CrossReferencePrecedentAction, ComputeStatutoryEligibilityAction,
-        AssessSuretyAction, ClassifyBailTypeAction, SubmitMemoAction,
+        AssessSuretyAction, ClassifyBailTypeAction,
+        ReadSubmissionsAction, AssessFlightRiskAction,
+        CheckCaseFactorsAction, ApplyProportionalityAction,
+        SubmitMemoAction,
     )
     ACTION_MAP = {
-        "request_document":          RequestDocumentAction,
-        "flag_inconsistency":        FlagInconsistencyAction,
-        "cross_reference_precedent": CrossReferencePrecedentAction,
-        "compute_statutory_eligibility": ComputeStatutoryEligibilityAction,
-        "assess_surety":             AssessSuretyAction,
-        "classify_bail_type":        ClassifyBailTypeAction,
-        "submit_memo":               SubmitMemoAction,
+        "request_document":             RequestDocumentAction,
+        "flag_inconsistency":           FlagInconsistencyAction,
+        "cross_reference_precedent":    CrossReferencePrecedentAction,
+        "compute_statutory_eligibility":ComputeStatutoryEligibilityAction,
+        "assess_surety":                AssessSuretyAction,
+        "classify_bail_type":           ClassifyBailTypeAction,
+        "read_submissions":             ReadSubmissionsAction,
+        "assess_flight_risk":           AssessFlightRiskAction,
+        "check_case_factors":           CheckCaseFactorsAction,
+        "apply_proportionality":        ApplyProportionalityAction,
+        "submit_memo":                  SubmitMemoAction,
     }
     action_cls = ACTION_MAP.get(tool_name)
     if not action_cls:
@@ -194,16 +201,23 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 from ..models import (
                     RequestDocumentAction, FlagInconsistencyAction,
                     CrossReferencePrecedentAction, ComputeStatutoryEligibilityAction,
-                    AssessSuretyAction, ClassifyBailTypeAction, SubmitMemoAction,
+                    AssessSuretyAction, ClassifyBailTypeAction,
+                    ReadSubmissionsAction, AssessFlightRiskAction,
+                    CheckCaseFactorsAction, ApplyProportionalityAction,
+                    SubmitMemoAction,
                 )
                 ACTION_MAP = {
-                    "request_document": RequestDocumentAction,
-                    "flag_inconsistency": FlagInconsistencyAction,
-                    "cross_reference_precedent": CrossReferencePrecedentAction,
+                    "request_document":              RequestDocumentAction,
+                    "flag_inconsistency":            FlagInconsistencyAction,
+                    "cross_reference_precedent":     CrossReferencePrecedentAction,
                     "compute_statutory_eligibility": ComputeStatutoryEligibilityAction,
-                    "assess_surety": AssessSuretyAction,
-                    "classify_bail_type": ClassifyBailTypeAction,
-                    "submit_memo": SubmitMemoAction,
+                    "assess_surety":                 AssessSuretyAction,
+                    "classify_bail_type":            ClassifyBailTypeAction,
+                    "read_submissions":              ReadSubmissionsAction,
+                    "assess_flight_risk":            AssessFlightRiskAction,
+                    "check_case_factors":            CheckCaseFactorsAction,
+                    "apply_proportionality":         ApplyProportionalityAction,
+                    "submit_memo":                   SubmitMemoAction,
                 }
                 action_cls = ACTION_MAP.get(tool_name)
                 if action_cls:
