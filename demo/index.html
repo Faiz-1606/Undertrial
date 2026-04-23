@@ -239,7 +239,7 @@ async function loadCase(stage) {
   const labels = {1:'Stage 1 — Landmark', 2:'Stage 2 — Contested', 3:'Stage 3 — Reversal', 4:'Stage 4 — Schema Drift (BNSS)'};
   document.getElementById('stageLabel').textContent = 'Live Demo Case — ' + (labels[stage] || 'Stage '+stage);
   try {
-    const res = await fetch(BASE + '/reset?stage=' + stage, { method: 'POST' });
+    const res = await fetch(BASE + '/reset?stage=' + stage + '&seed=0', { method: 'POST' });
     const data = await res.json();
     sessionId = data.session_id;
     const obs = data.observation;
@@ -279,8 +279,8 @@ async function runDemo() {
   document.getElementById('toolLog').innerHTML = '';
   document.getElementById('rewardCard').classList.remove('visible');
 
-  log('POST /reset?stage=' + stage, 'tool');
-  const res = await fetch(BASE + '/reset?stage=' + stage, { method: 'POST' });
+  log('POST /reset?stage=' + stage + '&seed=0', 'tool');
+  const res = await fetch(BASE + '/reset?stage=' + stage + '&seed=0', { method: 'POST' });
   const data = await res.json();
   sessionId = data.session_id;
   log('Session ready: ' + sessionId.slice(0,8) + '...', 'ok');

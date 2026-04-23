@@ -282,16 +282,27 @@ class BailDataset:
         self,
         stage: Optional[int] = None,
         apply_drift: bool = True,
+        seed: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Sample an episode from the requested curriculum stage."""
+        """Sample an episode from the requested curriculum stage.
+
+        Args:
+            stage: Curriculum stage 1-4. Defaults to current stage.
+            apply_drift: Apply BNSS schema drift for stage 4 episodes.
+            seed: If set, deterministically picks episode at index (seed % len).
+                  Used by the demo to always show the same illustrative case.
+        """
         s = stage if stage is not None else self._current_stage
 
         # Fallback: if stage is empty, try adjacent stages
         for candidate in [s, s-1, s+1, 1, 2, 3, 4]:
             if 1 <= candidate <= 4 and self._episodes[candidate]:
                 eps = self._episodes[candidate]
-                idx = self._episode_index[candidate] % len(eps)
-                self._episode_index[candidate] += 1
+                if seed is not None:
+                    idx = seed % len(eps)
+                else:
+                    idx = self._episode_index[candidate] % len(eps)
+                    self._episode_index[candidate] += 1
                 ep = eps[idx]
                 if apply_drift and s == 4:
                     ep = maybe_apply_drift(ep, probability=0.4)

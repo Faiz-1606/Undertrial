@@ -80,7 +80,7 @@ class UndertriAIEnvironment(Environment):
         """Start a new episode. Returns initial case observation."""
         self._reset_rubric() if hasattr(self, '_reset_rubric') else None
         s = stage or self._current_stage
-        self._episode    = self.dataset.sample_episode(stage=s)
+        self._episode    = self.dataset.sample_episode(stage=s, seed=seed)
         self._episode_id = episode_id or str(uuid.uuid4())
         self._step_count = 0
         self._flags      = []

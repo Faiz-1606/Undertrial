@@ -69,12 +69,12 @@ def health():
 
 
 @app.post("/reset")
-def reset(stage: int = 1, session_id: str = None):
+def reset(stage: int = 1, session_id: str = None, seed: int = None):
     if session_id is None:
         session_id = str(uuid.uuid4())
     env = get_or_create_env(session_id)
     env.set_stage(stage)
-    obs = env.reset(stage=stage)
+    obs = env.reset(stage=stage, seed=seed)
     return {
         "session_id": session_id,
         "observation": obs.model_dump(),
