@@ -1,14 +1,29 @@
 name: undertrial-ai
 version: "1.0.0"
-description: "OpenEnv-compliant RL environment for Indian bail decision support"
-author: "UndertriAI Team"
+description: >
+  OpenEnv-compliant RL training environment for Indian bail decision support.
+  An LLM agent reads High Court bail cases, invokes legal tools, and submits
+  structured bail recommendations. Reward computed deterministically against
+  real HC judgments with an explicit bias penalty (lambda=0.3).
+
+author: Draken1606
+license: MIT
+repository: https://github.com/Faiz-1606/Undertrial
+space: https://huggingface.co/spaces/Draken1606/undertrial-ai
+
 tags:
   - legal-ai
   - india
   - bail
   - grpo
   - world-modeling
-  - patronus-schema-drift
+  - bias-mitigation
+  - bnss-2023
+
+environment:
+  class: undertrial_ai.server.undertrial_environment.UndertriAIEnvironment
+  supports_concurrent_sessions: true
+  max_steps_per_episode: 10
 
 actions:
   - name: request_document
@@ -30,15 +45,31 @@ reward:
   formula: "0.4*outcome_match + 0.2*flight_risk_acc + 0.2*statutory_acc + 0.2*condition_acc - 0.3*bias_score"
   range: [0.0, 1.0]
   terminal_action: submit_memo
+  deterministic: true
+  llm_as_judge: false
+  components:
+    - outcome_match: "Agreement with real High Court decision (40%)"
+    - flight_risk_accuracy: "Flight risk classification accuracy (20%)"
+    - statutory_accuracy: "IPC/BNSS threshold computation (20%)"
+    - condition_appropriateness: "Bail condition quality (20%)"
+    - bias_penalty: "Penalty for ignoring parity in bias cases (-30%)"
 
 curriculum:
   stages: 4
   stage_1: "Landmark cases — legally clear-cut"
   stage_2: "Standard contested cases"
-  stage_3: "Bail cancellation / reversal cases"
+  stage_3: "Bias reversal / parity cases"
   stage_4: "Schema drift (IPC→BNSS, regional FIR formats)"
+
+training:
+  method: GRPO
+  framework: TRL + Unsloth
+  model: unsloth/Qwen2.5-3B-Instruct
+  notebook: training/UndertriAI_GRPO_Training.ipynb
+  script: training/train_grpo.py
 
 deployment:
   platform: huggingface-spaces
   sdk: docker
   port: 7860
+  url: https://draken1606-undertrial-ai.hf.space

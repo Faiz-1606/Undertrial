@@ -11,17 +11,23 @@ from .reward import compute_reward
 from .schema_drift import maybe_apply_drift
 
 try:
-    from openenv.core.env_server import Environment  # type: ignore
-    from openenv.core.models import StepResult       # type: ignore
+    from openenv.core import Environment  # type: ignore
+except ImportError:
+    try:
+        from openenv_core import Environment  # type: ignore
+    except ImportError:
+        class Environment:  # type: ignore
+            pass
+
+try:
+    from openenv.core.models import StepResult  # type: ignore
 except ImportError:
     from pydantic import BaseModel
-    class StepResult(BaseModel):
+    class StepResult(BaseModel):  # type: ignore
         observation: Any
         reward: float = 0.0
         done: bool = False
-        info: Dict[str, Any] = {}
-    class Environment:
-        pass
+        info: dict = {}
 
 from ..models import (
     BailAction, CaseObservation, AccusedProfile,
@@ -34,12 +40,15 @@ from .precedent_db import PrecedentDB
 
 class UndertriAIEnvironment(Environment):
     """
-    Bail Assessment Environment.
-    The agent reads a case and iteratively calls tools before submitting
-    a structured bail recommendation memo. Reward is computed against the
-    real High Court decision held in ground_truth.
+    Bail Assessment Environment — OpenEnv compliant.
+
+    The agent reads a bail case and iteratively calls legal tools before
+    submitting a structured bail recommendation memo. Reward is computed
+    deterministically against the real High Court decision (ground_truth).
     """
 
+    # Concurrent sessions are safe: each instance is independent (session_id isolation)
+    SUPPORTS_CONCURRENT_SESSIONS: bool = True
     MAX_STEPS = 10  # Maximum tool calls before forcing memo submission
 
     def __init__(
@@ -60,17 +69,29 @@ class UndertriAIEnvironment(Environment):
     # OpenEnv API
     # ------------------------------------------------------------------
 
-    def reset(self, stage: Optional[int] = None) -> CaseObservation:
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        episode_id: Optional[str] = None,
+        stage: Optional[int] = None,
+        **kwargs,
+    ) -> CaseObservation:
         """Start a new episode. Returns initial case observation."""
+        self._reset_rubric() if hasattr(self, '_reset_rubric') else None
         s = stage or self._current_stage
-        self._episode   = self.dataset.sample_episode(stage=s)
-        self._episode_id = str(uuid.uuid4())
+        self._episode    = self.dataset.sample_episode(stage=s)
+        self._episode_id = episode_id or str(uuid.uuid4())
         self._step_count = 0
         self._flags      = []
         self._retrieved_precedents = []
         return self._make_observation(action_result=None)
 
-    def step(self, action: BailAction) -> StepResult:
+    def step(
+        self,
+        action: BailAction,
+        timeout_s: Optional[float] = None,
+        **kwargs,
+    ) -> StepResult:
         """Execute one agent action. Returns StepResult with reward only when done."""
         if self._episode is None:
             raise RuntimeError("Call reset() before step().")
@@ -108,6 +129,7 @@ class UndertriAIEnvironment(Environment):
         obs = self._make_observation(action_result=result, memo_submitted=done)
         return StepResult(observation=obs, reward=reward, done=done, info={})
 
+    @property
     def state(self):
         """Return episode metadata (OpenEnv State interface)."""
         return {
