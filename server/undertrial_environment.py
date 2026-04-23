@@ -79,7 +79,6 @@ class UndertriAIEnvironment(Environment):
         **kwargs,
     ) -> CaseObservation:
         """Start a new episode. Returns initial case observation."""
-        self._reset_rubric() if hasattr(self, '_reset_rubric') else None
         s = stage or self._current_stage
 
         # reset() timeout guard — prevent infinite hang on slow dataset.sample_episode()

@@ -160,6 +160,10 @@ def compute_statutory_accuracy(
 
     score = 0.0
 
+    # Compute ground-truth eligibility for cases with known custody duration
+    half_sent_months = (max_sent * 12) / 2
+    truly_eligible   = (custody_mo >= half_sent_months) and not special_laws
+
     # 40%: eligibility direction vs. mathematical truth
     if agent_eligible == truly_eligible:
         score += 0.4
