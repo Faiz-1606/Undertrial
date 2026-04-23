@@ -5,7 +5,7 @@ against the UndertriAI bail assessment environment.
 
 Run in Google Colab (T4 GPU recommended):
     !pip install unsloth trl openenv-core
-    !pip install git+https://huggingface.co/spaces/openenv/undertrial-ai
+    !pip install git+https://huggingface.co/spaces/Draken1606/undertrial-ai
     # Then run this script
 
 Or locally:
