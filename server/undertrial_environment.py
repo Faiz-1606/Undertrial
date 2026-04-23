@@ -86,6 +86,7 @@ class UndertriAIEnvironment(Environment):
         self._step_count = 0
         self._flags      = []
         self._retrieved_precedents = []
+        self._action_history: List[str] = []  # accumulated tool results (Gap 4)
         return self._make_observation(action_result=None)
 
     def step(
@@ -113,6 +114,8 @@ class UndertriAIEnvironment(Environment):
                 agent_computation = action.statutory_computation,
                 agent_conditions  = action.recommended_conditions or [],
                 episode           = self._episode,
+                step_count        = self._step_count,   # Gap 5: efficiency reward
+                max_steps         = self.MAX_STEPS,
             )
             # Apply skip penalty (can push total legitimately negative)
             reward_dict["total_reward"] = round(reward_dict["total_reward"] - no_tool_penalty, 4)
@@ -148,6 +151,10 @@ class UndertriAIEnvironment(Environment):
                     )
         else:
             result = self._dispatch_tool(action)
+
+        # Accumulate action history (Gap 4)
+        summary = f"[Step {self._step_count}] {type(action).__name__}: {result[:120]}..."
+        self._action_history.append(summary)
 
         # Force submit if max steps reached
         done = (self._step_count >= self.MAX_STEPS)
@@ -277,6 +284,7 @@ class UndertriAIEnvironment(Environment):
             cited_precedents    = init_precedents + self._retrieved_precedents,
             documents_available = ep.get("documents_available", []),
             action_result       = action_result,
+            action_history      = list(self._action_history),  # Gap 4
             flags_raised        = list(self._flags),
             precedents_retrieved = list(self._retrieved_precedents),
             memo_submitted      = memo_submitted,

@@ -25,11 +25,19 @@ INSTALL_COMMANDS = """
 # CELL 2 — Imports
 # ============================================================
 
-import os, sys, json, re, argparse, random
+import os, sys, json, re, argparse, random, time
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+import urllib.request
+import urllib.parse
 
 import torch
+
+# ── Environment API (Gap 1) ─────────────────────────────────────────────────
+ENV_API_URL = os.environ.get(
+    "UNDERTRIAL_ENV_URL",
+    "https://draken1606-undertrial-ai.hf.space",
+)
 
 # ── Fix 1: Import authoritative reward functions from server/reward.py ──────
 # This ensures training optimises the SAME signal the deployed demo evaluates.
@@ -334,7 +342,15 @@ def combined_reward(
             ca = reward_conditions([comp], [ep])[0]  # condition score, not format
             b  = reward_no_bias([comp], [ep])[0]
 
-        total = 0.4*o + 0.2*fr + 0.2*s + 0.2*ca - 0.3*b
+        # R4 efficiency bonus: reward fewer steps when outcome is correct
+        eff = 0.0
+        if o >= 0.8:
+            steps_taken = kwargs.get("step_counts", [None] * len(completions))
+            sc = steps_taken[completions.index(comp)] if comp in completions else None
+            if sc is not None:
+                eff = max(0.0, 1.0 - (sc - 1) / 9)
+
+        total = 0.4*o + 0.2*fr + 0.2*s + 0.2*ca + 0.1*eff - 0.3*b
         rewards.append(round(total, 4))  # No max(0.0) clamp — bias can go negative
     return rewards
 
@@ -343,15 +359,117 @@ def combined_reward(
 # CELL 5 — Dataset builder
 # ============================================================
 
-def load_episodes(episodes_dir: str, stage: int = 1) -> List[Dict]:
+def load_episodes(
+    episodes_dir: str,
+    stage: int = 1,
+    split: str = "train",
+    val_fraction: float = 0.15,
+    test_fraction: float = 0.10,
+) -> List[Dict]:
+    """
+    Load episodes for a given split (Gap 2: train/val/test split).
+
+    Split fractions (applied deterministically by index, no shuffle):
+        train  = first (1 - val - test) fraction
+        val    = next val_fraction
+        test   = last test_fraction
+    """
     path = Path(episodes_dir) / f"episodes_stage_{stage}.jsonl"
     if not path.exists():
-        # Try the combined file
         path = Path(episodes_dir) / "episodes_all.jsonl"
     if not path.exists():
-        raise FileNotFoundError(f"No episodes found in {episodes_dir}. Run data/prepare_dataset.py first.")
+        raise FileNotFoundError(f"No episodes found in {episodes_dir}.")
     with open(path, encoding="utf-8") as f:
-        return [json.loads(l) for l in f if l.strip()]
+        all_eps = [json.loads(l) for l in f if l.strip()]
+
+    n = len(all_eps)
+    n_test = max(1, int(n * test_fraction))
+    n_val  = max(1, int(n * val_fraction))
+    n_train = n - n_val - n_test
+
+    if split == "train":
+        return all_eps[:n_train]
+    elif split == "val":
+        return all_eps[n_train:n_train + n_val]
+    elif split == "test":
+        return all_eps[n_train + n_val:]
+    else:
+        return all_eps  # all: for backward compat
+
+
+def rollout_via_env_api(
+    completion: str,
+    episode: Dict,
+    env_url: str = ENV_API_URL,
+    session_id: Optional[str] = None,
+    timeout: float = 10.0,
+) -> float:
+    """
+    Gap 1: Route reward through the live deployed environment API.
+
+    Sends the model's completion to the environment server via HTTP,
+    replaying the parsed submit_memo action, and returns the official reward.
+    Falls back to local reward on any network error.
+    """
+    import urllib.error
+    try:
+        from server.reward import compute_reward as _local_reward
+    except ImportError:
+        _local_reward = None
+
+    parsed = parse_model_output(completion)
+    if not parsed["recommended_outcome"]:
+        return 0.0  # Malformed output
+
+    try:
+        # Step 1: Reset the environment with the correct episode
+        episode_stage = episode.get("curriculum_stage", 1)
+        reset_url = f"{env_url}/reset?stage={episode_stage}"
+        req = urllib.request.Request(reset_url, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            reset_data = json.loads(resp.read())
+        sid = session_id or reset_data.get("session_id", "")
+
+        # Step 2: Submit the parsed memo
+        memo_payload = json.dumps({
+            "session_id": sid,
+            "action": {
+                "tool_name": "submit_memo",
+                "flight_risk": parsed["flight_risk"] or "Medium",
+                "flight_risk_justification": parsed["flight_risk_just"] or "Not specified",
+                "statutory_eligible": parsed["statutory_eligible"],
+                "statutory_computation": parsed["statutory_computation"] or "Not computed",
+                "grounds_for_bail": parsed["grounds_for"] or [],
+                "grounds_against_bail": parsed["grounds_against"] or [],
+                "recommended_outcome": parsed["recommended_outcome"],
+                "recommended_conditions": parsed["conditions"] or [],
+                "confidence": "Medium",
+            }
+        }).encode()
+        step_req = urllib.request.Request(
+            f"{env_url}/step",
+            data=memo_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(step_req, timeout=timeout) as resp:
+            step_data = json.loads(resp.read())
+        return float(step_data.get("reward", 0.0))
+
+    except Exception as e:
+        # Network / parse error: fall back to local reward
+        print(f"[env_api] Falling back to local reward: {e}")
+        if _local_reward and episode:
+            rd = _local_reward(
+                agent_outcome=parsed["recommended_outcome"],
+                agent_flight_risk=parsed["flight_risk"] or "Medium",
+                agent_eligible=parsed["statutory_eligible"],
+                agent_computation=parsed["statutory_computation"] or "",
+                agent_conditions=parsed["conditions"] or [],
+                episode=episode,
+            )
+            return rd["total_reward"]
+        return 0.0
 
 
 def build_hf_dataset(episodes: List[Dict], tokenizer) -> Dataset:

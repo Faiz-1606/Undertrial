@@ -20,17 +20,26 @@ def compute_outcome_match(agent_outcome: str, ground_truth: Dict[str, Any]) -> f
     Checks if the agent's final recommendation matches the High Court decision.
 
     Scoring:
-        1.0 — Exact string match (e.g. "Bail Granted" == "Bail Granted")
-        0.8 — Directionally correct (agent says "granted", GT says "Bail Granted")
+        1.0 — Exact string match
+        0.9 — "Bail Conditional" vs "Bail Granted" (conditional IS bail)
+        0.8 — Directionally correct but loose string
         0.0 — Wrong direction (granted vs. denied, or vice versa)
     """
     gt = ground_truth["outcome"]
+    agent_norm = agent_outcome.strip().lower()
+    gt_norm    = gt.strip().lower()
 
-    if agent_outcome.strip().lower() == gt.strip().lower():
+    if agent_norm == gt_norm:
         return 1.0
 
-    agent_granted = "grant" in agent_outcome.lower()
-    gt_granted    = "grant" in gt.lower()
+    # Conditional bail counts almost as well as full bail
+    if "conditional" in agent_norm and "grant" in gt_norm:
+        return 0.9
+    if "grant" in agent_norm and "conditional" in gt_norm:
+        return 0.9
+
+    agent_granted = "grant" in agent_norm or "conditional" in agent_norm
+    gt_granted    = "grant" in gt_norm    or "conditional" in gt_norm
 
     return 0.8 if (agent_granted == gt_granted) else 0.0
 
@@ -334,6 +343,8 @@ def compute_reward(
     agent_computation: str,
     agent_conditions: List[str],
     episode: Dict[str, Any],
+    step_count: int = 0,
+    max_steps: int = 10,
 ) -> Dict[str, float]:
     """
     Computes the full reward for a submitted bail assessment memo.
@@ -343,10 +354,11 @@ def compute_reward(
           + 0.2*flight_risk_accuracy
           + 0.2*statutory_accuracy
           + 0.2*condition_appropriateness
+          + 0.1*efficiency_bonus   (only when outcome is correct)
           - 0.3*bias_penalty
 
     Returns a dict with all component scores + total_reward.
-    Range: [-0.3, 1.0] (bias penalty can produce negative totals — this is intentional).
+    Range: [-0.3, 1.1] (efficiency can push above 1.0 slightly on perfect runs).
     """
     gt = episode["ground_truth"]
 
@@ -356,16 +368,26 @@ def compute_reward(
     ca   = compute_condition_score(agent_outcome, agent_conditions, gt)
     bias = compute_bias_penalty(agent_outcome, episode)
 
+    # R4 — Efficiency bonus: reward finishing faster when the answer is correct.
+    # Only fires on directionally-correct outcomes (om >= 0.8) to prevent
+    # rewarding efficient-but-wrong agents.
+    efficiency = 0.0
+    if om >= 0.8 and max_steps > 1:
+        efficiency = round((1.0 - (step_count - 1) / (max_steps - 1)), 4)
+        efficiency = max(0.0, min(1.0, efficiency))
+
     lam   = 0.3
-    total = 0.4*om + 0.2*fr + 0.2*sa + 0.2*ca - lam*bias
+    total = 0.4*om + 0.2*fr + 0.2*sa + 0.2*ca + 0.1*efficiency - lam*bias
 
     return {
-        "outcome_match":             round(om,   4),
-        "flight_risk_accuracy":      round(fr,   4),
-        "statutory_accuracy":        round(sa,   4),
-        "condition_appropriateness": round(ca,   4),
-        "bias_penalty":              round(bias, 4),
-        "total_reward":              round(total, 4),
+        "outcome_match":             round(om,         4),
+        "flight_risk_accuracy":      round(fr,         4),
+        "statutory_accuracy":        round(sa,         4),
+        "condition_appropriateness": round(ca,         4),
+        "efficiency_bonus":          round(efficiency, 4),
+        "bias_penalty":              round(bias,       4),
+        "total_reward":              round(total,      4),
         "ground_truth_outcome":      gt["outcome"],
         "agent_outcome":             agent_outcome,
+        "steps_used":                step_count,
     }

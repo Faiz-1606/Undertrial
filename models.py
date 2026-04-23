@@ -121,8 +121,8 @@ class SubmitMemoAction(Action):
     )
 
     # Recommendation
-    recommended_outcome: Literal["Bail Granted", "Bail Denied"] = Field(
-        ..., description="Final recommendation"
+    recommended_outcome: Literal["Bail Granted", "Bail Denied", "Bail Conditional"] = Field(
+        ..., description="Final recommendation: Bail Granted | Bail Denied | Bail Conditional (strict conditions)"
     )
     recommended_conditions: Optional[List[str]] = Field(
         None,
@@ -186,6 +186,10 @@ class CaseObservation(Observation):
 
     # Episode state
     action_result: Optional[str] = None
+    action_history: List[str] = Field(
+        default_factory=list,
+        description="Ordered log of all tool results seen so far this episode",
+    )
     flags_raised: List[str] = Field(default_factory=list)
     precedents_retrieved: List[str] = Field(default_factory=list)
     memo_submitted: bool = False
