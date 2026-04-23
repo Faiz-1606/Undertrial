@@ -148,13 +148,17 @@ def list_tools():
     """Return available tool signatures (RFC 002 — tool discoverability)."""
     return {
         "tools": [
-            {"name": "request_document",           "description": "Request a missing document"},
-            {"name": "flag_inconsistency",         "description": "Flag legal inconsistency"},
-            {"name": "cross_reference_precedent",  "description": "Retrieve relevant precedent"},
-            {"name": "compute_statutory_eligibility", "description": "Check default bail eligibility"},
-            {"name": "assess_surety",              "description": "Evaluate surety viability"},
-            {"name": "classify_bail_type",         "description": "Classify bail type from grounds"},
-            {"name": "submit_memo",                "description": "TERMINAL — Submit assessment memo"},
+            {"name": "request_document",             "description": "Request a missing document (FIR, charge sheet, prior judgment)"},
+            {"name": "flag_inconsistency",           "description": "Flag a legal inconsistency in the record"},
+            {"name": "cross_reference_precedent",    "description": "Retrieve relevant SC/HC precedent"},
+            {"name": "compute_statutory_eligibility","description": "Check BNSS 479 default bail eligibility"},
+            {"name": "assess_surety",                "description": "Evaluate financial viability of proposed surety"},
+            {"name": "classify_bail_type",           "description": "Classify bail type from grounds for/against"},
+            {"name": "read_submissions",             "description": "Read and summarise prosecution or defence submissions"},
+            {"name": "assess_flight_risk",           "description": "Systematic flight risk assessment with scoring matrix"},
+            {"name": "check_case_factors",           "description": "Examine specific case factors (parity, evidence tampering, victim vulnerability)"},
+            {"name": "apply_proportionality",        "description": "Apply BNSS 479 proportionality: custody vs. max sentence vs. trial timeline"},
+            {"name": "submit_memo",                  "description": "TERMINAL — Submit structured bail assessment memo"},
         ]
     }
 

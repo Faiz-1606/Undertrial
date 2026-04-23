@@ -31,10 +31,13 @@ except ImportError:
         info: dict = {}
 
 from ..models import (
-    BailAction, CaseObservation, AccusedProfile,
-    RequestDocumentAction, FlagInconsistencyAction,
-    CrossReferencePrecedentAction, ComputeStatutoryEligibilityAction,
-    AssessSuretyAction, ClassifyBailTypeAction, SubmitMemoAction,
+    AccusedProfile, CaseObservation, StepResult,
+    BailAction,
+    RequestDocumentAction, FlagInconsistencyAction, CrossReferencePrecedentAction,
+    ComputeStatutoryEligibilityAction, AssessSuretyAction, ClassifyBailTypeAction,
+    ReadSubmissionsAction, AssessFlightRiskAction, CheckCaseFactorsAction,
+    ApplyProportionalityAction,
+    SubmitMemoAction,
 )
 from .precedent_db import PrecedentDB
 
@@ -257,6 +260,84 @@ class UndertriAIEnvironment(Environment):
                 f"  Grounds AGAINST bail ({pros_count}): {'; '.join(action.grounds_against[:3])}\n"
                 f"  → Preliminary classification: {suggestion}"
             )
+
+        elif isinstance(action, ReadSubmissionsAction):
+            ep = self._episode
+            lines = []
+            if action.party in ("prosecution", "both"):
+                pros = ep.get("prosecution_arguments", [])
+                lines.append("── Prosecution Submissions ──")
+                lines += [f"  {i+1}. {a}" for i, a in enumerate(pros)] or ["  (none on record)"]
+            if action.party in ("defence", "both"):
+                defence = ep.get("defence_arguments", [])
+                lines.append("── Defence Submissions ──")
+                lines += [f"  {i+1}. {a}" for i, a in enumerate(defence)] or ["  (none on record)"]
+            if action.focus:
+                lines.append(f"\n[Focus filter: '{action.focus}' — review above for relevance]")
+            return "\n".join(lines)
+
+        elif isinstance(action, AssessFlightRiskAction):
+            score = 0
+            reasons = []
+            severity_map = {"minor": 0, "moderate": 1, "serious": 2, "heinous": 3}
+            score += severity_map.get(action.severity_of_offence, 1)
+            reasons.append(f"Offence severity ({action.severity_of_offence}): +{severity_map.get(action.severity_of_offence, 1)}")
+            if action.prior_absconding:
+                score += 3; reasons.append("Prior absconding on record: +3")
+            if action.passport_status and action.passport_status not in ("surrendered", "impounded"):
+                score += 2; reasons.append(f"Passport status ({action.passport_status}): +2")
+            if action.roots_in_community:
+                score -= 1; reasons.append("Community roots present: −1")
+            if score <= 1:   verdict = "Low"
+            elif score <= 3: verdict = "Medium"
+            else:            verdict = "High"
+            return (
+                "Flight Risk Assessment:\n"
+                + "\n".join(f"  {r}" for r in reasons)
+                + f"\n  Total score: {score}"
+                + f"\n  → FLIGHT RISK: {verdict}"
+            )
+
+        elif isinstance(action, CheckCaseFactorsAction):
+            ep = self._episode
+            gt = ep.get("ground_truth", {})
+            results = []
+            for factor in action.factors_to_check:
+                f = factor.lower()
+                if "offence" in f or "nature" in f:
+                    results.append(f"nature_of_offence: {ep.get('crime_type', 'unknown')} — sections: {', '.join(ep.get('ipc_sections', ['n/a']))}")
+                elif "prior" in f or "history" in f or "criminal" in f:
+                    results.append(f"criminal_history: {ep.get('accused_profile', {}).get('prior_cases', 'no prior cases on record')}")
+                elif "co_accused" in f or "parity" in f:
+                    parity = gt.get("parity_argument_used", False)
+                    results.append(f"co_accused_parity_argument: {'YES — HC relied on parity reasoning' if parity else 'Not applicable in this case'}")
+                elif "evidence" in f or "tampering" in f:
+                    results.append(f"evidence_tampering_risk: {'flagged' if self._flags else 'no inconsistencies flagged yet — run flag_inconsistency if needed'}")
+                elif "victim" in f or "vulnerability" in f:
+                    results.append(f"victim_vulnerability: assess from charge sheet — crime_type is {ep.get('crime_type', 'unknown')}")
+                else:
+                    results.append(f"{factor}: case record does not have a structured field for this — review charge sheet.")
+            return "Case Factors Examined:\n" + "\n".join(f"  • {r}" for r in results)
+
+        elif isinstance(action, ApplyProportionalityAction):
+            max_months = action.max_sentence_years * 12
+            pct = round((action.custody_months / max_months) * 100, 1) if max_months else 0
+            bnss_threshold = max_months / 2
+            over_threshold = action.custody_months >= bnss_threshold
+            lines = [
+                "Proportionality Analysis (BNSS 479 / former CrPC 436A):",
+                f"  Custody to date:    {action.custody_months:.1f} months",
+                f"  Max sentence:       {action.max_sentence_years} years ({max_months:.0f} months)",
+                f"  BNSS 479 threshold: {bnss_threshold:.1f} months (50%)",
+                f"  Time served:        {pct}% of maximum sentence",
+                f"  → Threshold crossed: {'YES — default bail right accrued' if over_threshold else 'NO — threshold not yet met'}",
+            ]
+            if action.expected_trial_months:
+                remaining = action.expected_trial_months
+                lines.append(f"  Estimated trial completion: {remaining:.0f} more months")
+                if remaining > (max_months - action.custody_months):
+                    lines.append("  ⚠️  Projected total custody exceeds maximum sentence — strong proportionality argument for bail")
+            return "\n".join(lines)
 
         return f"Unknown action type: {type(action).__name__}"
 

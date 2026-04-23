@@ -89,6 +89,52 @@ class ClassifyBailTypeAction(Action):
     accused_category: Optional[str] = Field(None, description="First-time offender | repeat | undertrial | convict")
 
 
+class ReadSubmissionsAction(Action):
+    """Read and summarise prosecution or defence submissions on record."""
+    tool_name: Literal["read_submissions"] = "read_submissions"
+    party: Literal["prosecution", "defence", "both"] = Field(
+        ..., description="Which party's submissions to read"
+    )
+    focus: Optional[str] = Field(
+        None, description="Specific legal issue to focus on (e.g. 'flight risk', 'BNSS 479')"
+    )
+
+
+class AssessFlightRiskAction(Action):
+    """Systematically assess the accused's flight risk based on case factors."""
+    tool_name: Literal["assess_flight_risk"] = "assess_flight_risk"
+    roots_in_community: Optional[str] = Field(
+        None, description="Evidence of local ties: family, employment, property"
+    )
+    prior_absconding: bool = Field(False, description="Has the accused ever absconded before?")
+    passport_status: Optional[str] = Field(
+        None, description="surrendered | impounded | at-large | unknown"
+    )
+    severity_of_offence: Literal["minor", "moderate", "serious", "heinous"] = Field(
+        ..., description="Gravity of the offence (determines flight incentive)"
+    )
+
+
+class CheckCaseFactorsAction(Action):
+    """Examine specific case factors relevant to bail determination."""
+    tool_name: Literal["check_case_factors"] = "check_case_factors"
+    factors_to_check: List[str] = Field(
+        ...,
+        description="Factors to examine, e.g.: 'nature_of_offence', 'victim_vulnerability', "
+                    "'evidence_tampering_risk', 'co_accused_bail_status', 'recovery_of_property'"
+    )
+
+
+class ApplyProportionalityAction(Action):
+    """Apply proportionality principle: custody duration vs. maximum sentence vs. trial timeline."""
+    tool_name: Literal["apply_proportionality"] = "apply_proportionality"
+    custody_months: float = Field(..., description="Months in custody to date")
+    max_sentence_years: float = Field(..., description="Maximum sentence for the most serious charge")
+    expected_trial_months: Optional[float] = Field(
+        None, description="Estimated months until trial completion (if known)"
+    )
+
+
 class SubmitMemoAction(Action):
     """
     TERMINAL ACTION — Submit the structured bail assessment memo.
@@ -143,6 +189,10 @@ BailAction = Union[
     ComputeStatutoryEligibilityAction,
     AssessSuretyAction,
     ClassifyBailTypeAction,
+    ReadSubmissionsAction,
+    AssessFlightRiskAction,
+    CheckCaseFactorsAction,
+    ApplyProportionalityAction,
     SubmitMemoAction,
 ]
 
