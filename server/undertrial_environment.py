@@ -3,6 +3,7 @@ UndertriAI — Core OpenEnv Environment (Server-Side)
 Implements the bail assessment RL training environment.
 """
 
+import concurrent.futures
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -101,6 +102,10 @@ class UndertriAIEnvironment(Environment):
 
         # ---- Terminal action: submit memo ----
         if isinstance(action, SubmitMemoAction):
+            # Penalty for skipping all tool calls (tool_skip_bypass fix)
+            # Agent must use at least 1 tool before submitting or lose 0.15
+            no_tool_penalty = 0.15 if self._step_count == 1 else 0.0
+
             reward_dict = compute_reward(
                 agent_outcome     = action.recommended_outcome,
                 agent_flight_risk = action.flight_risk,
@@ -109,6 +114,10 @@ class UndertriAIEnvironment(Environment):
                 agent_conditions  = action.recommended_conditions or [],
                 episode           = self._episode,
             )
+            # Apply skip penalty (can push total legitimately negative)
+            reward_dict["total_reward"] = round(reward_dict["total_reward"] - no_tool_penalty, 4)
+            reward_dict["tool_skip_penalty"] = no_tool_penalty
+
             obs = self._make_observation(
                 action_result=self._format_memo_result(action, reward_dict),
                 memo_submitted=True,
@@ -120,8 +129,25 @@ class UndertriAIEnvironment(Environment):
                 info=reward_dict,
             )
 
-        # ---- Tool actions ----
-        result = self._dispatch_tool(action)
+        # ---- Tool actions with optional timeout enforcement ----
+        if timeout_s is not None:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self._dispatch_tool, action)
+                try:
+                    result = future.result(timeout=timeout_s)
+                except concurrent.futures.TimeoutError:
+                    obs = self._make_observation(
+                        action_result=f"TIMEOUT: tool call exceeded {timeout_s}s limit",
+                        memo_submitted=False,
+                    )
+                    return StepResult(
+                        observation=obs,
+                        reward=-0.05,
+                        done=False,
+                        info={"timeout": True, "tool": type(action).__name__},
+                    )
+        else:
+            result = self._dispatch_tool(action)
 
         # Force submit if max steps reached
         done = (self._step_count >= self.MAX_STEPS)

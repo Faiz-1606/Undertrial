@@ -132,7 +132,7 @@ def step(payload: dict):
 def state(session_id: str):
     if session_id not in _sessions:
         return JSONResponse(status_code=400, content={"error": "Invalid session_id."})
-    return _sessions[session_id].state()
+    return _sessions[session_id].state
 
 
 @app.get("/tools")

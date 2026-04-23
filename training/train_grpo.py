@@ -41,6 +41,7 @@ try:
         compute_outcome_match,
         compute_flight_risk_accuracy,
         compute_statutory_accuracy,
+        compute_condition_score,
         compute_bias_penalty as _server_bias,
     )
     _USE_SERVER_REWARDS = True
@@ -143,10 +144,26 @@ def extract_xml_list(text: str, tag: str, item_tag: str = "ground") -> List[str]
 
 
 def parse_model_output(output: str) -> Dict[str, Any]:
-    """Parse model's XML output into structured fields."""
+    """Parse model's XML output into structured fields.
+
+    IMPORTANT: If no <memo> tag is found, returns a zero-scored empty dict.
+    We do NOT fall back to parsing raw output text — that's an exploit vector
+    where an agent could scatter keywords in free text to trigger regex hits.
+    """
     memo_block = extract_xml_field(output, "memo")
     if not memo_block:
-        memo_block = output  # fallback: parse directly
+        # Return empty/zero dict — no reward for malformed output
+        return {
+            "recommended_outcome":   "",
+            "flight_risk":           "",
+            "flight_risk_just":      "",
+            "statutory_eligible":    False,
+            "statutory_computation": "",
+            "grounds_for":           [],
+            "grounds_against":       [],
+            "conditions":            [],
+            "has_think_block":       "<think>" in output.lower(),
+        }
 
     return {
         "recommended_outcome":  extract_xml_field(memo_block, "recommended_outcome"),
@@ -232,6 +249,26 @@ def reward_statutory(completions: List[str], episode_batch: List[Dict], **kwargs
         scores.append(min(1.0, score))
     return scores
 
+def reward_conditions(completions: List[str], episode_batch: List[Dict], **kwargs) -> List[float]:
+    """20% weight: appropriate bail conditions for the case type and risk profile."""
+    scores = []
+    for comp, ep in zip(completions, episode_batch):
+        parsed     = parse_model_output(comp)
+        outcome    = parsed["recommended_outcome"].lower()
+        conditions = parsed["conditions"]
+        score = 0.0
+        if "grant" in outcome:
+            if len(conditions) >= 1: score += 0.5
+            if len(conditions) >= 2: score += 0.3
+            cond_text = " ".join(conditions).lower()
+            for kw in ["surety", "bond", "report", "passport", "permission"]:
+                if kw in cond_text:
+                    score = min(1.0, score + 0.04)
+        else:
+            # Denial should have empty conditions
+            score = 1.0 if len(conditions) == 0 else 0.5
+        scores.append(min(1.0, score))
+    return scores
 
 def reward_no_bias(completions: List[str], episode_batch: List[Dict], **kwargs) -> List[float]:
     """
@@ -267,14 +304,14 @@ def combined_reward(
 ) -> List[float]:
     """
     Master reward combining all components.
-    R = 0.4*outcome + 0.2*flight_risk + 0.2*statutory + 0.2*format - 0.3*bias
+    R = 0.4*outcome + 0.2*flight_risk + 0.2*statutory + 0.2*condition - 0.3*bias
 
     Uses server/reward.py functions when available (Fix 1).
+    Condition appropriateness replaces format score (Fix 2).
     """
-    fmt  = reward_format(completions)
     rewards = []
 
-    for comp, ep, f in zip(completions, episode_batch, fmt):
+    for comp, ep in zip(completions, episode_batch):
         parsed = parse_model_output(comp)
         gt     = ep.get("ground_truth", {})
 
@@ -283,16 +320,22 @@ def combined_reward(
             o  = compute_outcome_match(parsed["recommended_outcome"], gt)
             fr = compute_flight_risk_accuracy(parsed["flight_risk"], gt)
             s  = compute_statutory_accuracy(parsed, ep)
+            ca = compute_condition_score(
+                parsed["recommended_outcome"],
+                parsed.get("conditions", []),
+                gt,
+            )
             b  = _server_bias(parsed, ep)
         else:
             # Local fallback
             o  = reward_outcome_match([comp], [ep])[0]
             fr = reward_flight_risk([comp], [ep])[0]
             s  = reward_statutory([comp], [ep])[0]
+            ca = reward_conditions([comp], [ep])[0]  # condition score, not format
             b  = reward_no_bias([comp], [ep])[0]
 
-        total = 0.4*o + 0.2*fr + 0.2*s + 0.2*f - 0.3*b
-        rewards.append(round(max(0.0, total), 4))
+        total = 0.4*o + 0.2*fr + 0.2*s + 0.2*ca - 0.3*b
+        rewards.append(round(total, 4))  # No max(0.0) clamp — bias can go negative
     return rewards
 
 

@@ -346,7 +346,7 @@ def compute_reward(
           - 0.3*bias_penalty
 
     Returns a dict with all component scores + total_reward.
-    Range: [0.0, 1.0] (clamped to non-negative).
+    Range: [-0.3, 1.0] (bias penalty can produce negative totals — this is intentional).
     """
     gt = episode["ground_truth"]
 
@@ -365,7 +365,7 @@ def compute_reward(
         "statutory_accuracy":        round(sa,   4),
         "condition_appropriateness": round(ca,   4),
         "bias_penalty":              round(bias, 4),
-        "total_reward":              round(max(0.0, total), 4),
+        "total_reward":              round(total, 4),
         "ground_truth_outcome":      gt["outcome"],
         "agent_outcome":             agent_outcome,
     }
