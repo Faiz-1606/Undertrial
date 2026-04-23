@@ -135,6 +135,14 @@ def state(session_id: str):
     return _sessions[session_id].state
 
 
+@app.get("/observation")
+def observation(session_id: str):
+    """OpenEnv spec alias for /state — returns current episode observation."""
+    if session_id not in _sessions:
+        return JSONResponse(status_code=400, content={"error": "Invalid session_id."})
+    return _sessions[session_id].state
+
+
 @app.get("/tools")
 def list_tools():
     """Return available tool signatures (RFC 002 — tool discoverability)."""

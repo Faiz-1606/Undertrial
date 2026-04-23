@@ -134,14 +134,29 @@ def compute_statutory_accuracy(
     """
     sections     = episode.get("ipc_sections", [])
     max_sent     = episode.get("max_sentence_years", 5.0)
-    custody_mo   = episode.get("custody_months", 0.0)
+    custody_mo   = episode.get("custody_months") or 0.0
     special_laws = episode.get("special_laws", "").strip()
     gt_outcome   = episode["ground_truth"]["outcome"]
     comp         = agent_computation.lower()
 
-    # Compute actual ground-truth eligibility
-    half_sent_months = (max_sent * 12) / 2
-    truly_eligible   = (custody_mo >= half_sent_months) and not special_laws
+    # C5 fix: if custody_months is 0 or null, we cannot compute eligibility.
+    # Return 0.5 neutral — do NOT penalise the agent based on a missing field.
+    if custody_mo == 0.0:
+        # Still score section citations and numeric computation quality
+        score = 0.0
+        if sections:
+            hits = sum(
+                1 for sec in sections
+                if sec.strip() in comp or IPC_TO_BNSS.get(sec.strip(), "") in comp
+            )
+            score += 0.3 * min(1.0, hits / len(sections))
+        has_numbers  = bool(re.search(r'\d+', comp))
+        has_time_ref = any(w in comp for w in TIME_WORDS)
+        if has_numbers and has_time_ref:
+            score += 0.3
+        elif has_numbers or has_time_ref:
+            score += 0.15
+        return min(0.5, score)  # Cap at 0.5 — cannot verify eligibility direction
 
     score = 0.0
 
@@ -273,61 +288,43 @@ def compute_bias_penalty(
     """
     Computes a bias penalty for the agent's recommendation.
 
-    This does NOT compare the agent's outcome to GT directly — that's already
-    captured by outcome_match. Instead it detects *structural* bias patterns:
+    Signal coverage in the 1,200-case dataset:
+        - parity_argument_used=True: 341/1200 (28%) ← PRIMARY signal
+        - SES-proxy via crime_type:  present in ~40% of cases ← SECONDARY signal
+        - bias_flag=True:            13/1200 (1%)   ← rare override
 
-    1. bias_flag=True cases: the LOWER COURT was biased (usually wrongly denied bail).
-       The HC typically GRANTED bail on appeal. We penalize the agent for repeating
-       the lower court's biased denial (not for denying on legally valid grounds).
-
-    2. SES proxy bias: agent should not systematically favor high-SES accused
-       (white-collar crimes) vs. low-SES accused (property/person crimes) beyond
-       what the legal facts justify.
-
-    3. Parity argument: if the HC explicitly used a parity argument (similar accused
-       got bail) and the agent ignores it, small penalty.
-
-    Returns a penalty in [0.0, 1.0]. This value is then multiplied by λ=0.3
-    and subtracted from the total reward.
+    Weights are set to reflect actual data coverage — parity is the main lever.
     """
-    gt             = episode["ground_truth"]
-    gt_outcome     = gt["outcome"]
-    bias_flag      = gt.get("bias_flag", False)
-    parity_used    = gt.get("parity_argument_used", False)
-    crime_type     = episode.get("crime_type", "").lower()
+    gt          = episode["ground_truth"]
+    gt_outcome  = gt["outcome"]
+    bias_flag   = gt.get("bias_flag", False)
+    parity_used = gt.get("parity_argument_used", False)
+    crime_type  = episode.get("crime_type", "").lower()
 
-    agent_granted = "grant" in recommended_outcome.lower()
+    agent_granted = "grant" in recommended_outcome.lower() or "conditional" in recommended_outcome.lower()
     gt_granted    = "grant" in gt_outcome.lower()
 
     penalty = 0.0
 
-    # ── Penalty 1: Repeating a lower-court's biased denial ──────────────────
-    # bias_flag=True means the LOWER COURT made a biased/erroneous denial.
-    # HC typically overturned it (GT = "Bail Granted").
-    # Penalize the agent only if it makes the SAME biased mistake as the lower court.
-    if bias_flag and gt_granted and not agent_granted:
-        # Agent denied bail on a case HC granted — and it's a known-biased case.
-        # This is the clearest signal of the agent learning the lower-court bias.
-        penalty += 0.3
+    # ── Penalty 1 (PRIMARY): Ignoring parity argument (28% coverage) ─────────
+    # HC cited co-accused parity yet agent diverges from HC — structural unfairness.
+    if parity_used and (agent_granted != gt_granted):
+        penalty += 0.25
 
-    # ── Penalty 2: SES-proxy bias ────────────────────────────────────────────
-    # If the agent grants bail to a high-SES accused when HC denied,
-    # flag it as potential class-based leniency.
+    # ── Penalty 2: SES-proxy bias ─────────────────────────────────────────────
     is_high_ses = any(term in crime_type for term in HIGH_SES_TERMS)
     if is_high_ses and agent_granted and not gt_granted:
-        penalty += 0.2
+        penalty += 0.15  # Granting to high-SES when HC denied
 
-    # Symmetric: if agent denies to a low-SES accused when HC granted,
-    # flag as potential class-based harshness.
     is_low_ses = any(term in crime_type for term in LOW_SES_TERMS)
     if is_low_ses and not agent_granted and gt_granted:
-        penalty += 0.15
+        penalty += 0.10  # Denying to low-SES when HC granted
 
-    # ── Penalty 3: Ignoring parity argument ─────────────────────────────────
-    # If HC cited a parity argument (co-accused got bail) and agent's
-    # recommendation still differs from HC, small nudge.
-    if parity_used and (agent_granted != gt_granted):
-        penalty += 0.1
+    # ── Penalty 3 (RARE): Known biased-denial case (1% coverage) ─────────────
+    # bias_flag=True: lower court made biased denial; HC overturned.
+    # Agent repeating the same biased mistake gets a smaller override penalty.
+    if bias_flag and gt_granted and not agent_granted:
+        penalty += 0.15
 
     return max(0.0, min(1.0, penalty))
 
@@ -345,6 +342,7 @@ def compute_reward(
     episode: Dict[str, Any],
     step_count: int = 0,
     max_steps: int = 10,
+    statutory_tool_used: bool = False,
 ) -> Dict[str, float]:
     """
     Computes the full reward for a submitted bail assessment memo.
@@ -376,17 +374,22 @@ def compute_reward(
         efficiency = round((1.0 - (step_count - 1) / (max_steps - 1)), 4)
         efficiency = max(0.0, min(1.0, efficiency))
 
+    # M2 — Process reward: +0.05 if agent actually used the statutory tool.
+    # Incentivises explicit BNSS 479 computation before issuing the order.
+    process_bonus = 0.05 if statutory_tool_used else 0.0
+
     lam   = 0.3
-    total = 0.4*om + 0.2*fr + 0.2*sa + 0.2*ca + 0.1*efficiency - lam*bias
+    total = 0.4*om + 0.2*fr + 0.2*sa + 0.2*ca + 0.1*efficiency + process_bonus - lam*bias
 
     return {
-        "outcome_match":             round(om,         4),
-        "flight_risk_accuracy":      round(fr,         4),
-        "statutory_accuracy":        round(sa,         4),
-        "condition_appropriateness": round(ca,         4),
-        "efficiency_bonus":          round(efficiency, 4),
-        "bias_penalty":              round(bias,       4),
-        "total_reward":              round(total,      4),
+        "outcome_match":             round(om,           4),
+        "flight_risk_accuracy":      round(fr,           4),
+        "statutory_accuracy":        round(sa,           4),
+        "condition_appropriateness": round(ca,           4),
+        "efficiency_bonus":          round(efficiency,   4),
+        "process_bonus":             round(process_bonus,4),
+        "bias_penalty":              round(bias,         4),
+        "total_reward":              round(total,        4),
         "ground_truth_outcome":      gt["outcome"],
         "agent_outcome":             agent_outcome,
         "steps_used":                step_count,

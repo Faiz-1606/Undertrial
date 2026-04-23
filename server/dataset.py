@@ -307,7 +307,7 @@ class BailDataset:
                     self._episode_index[candidate] += 1
                 ep = eps[idx]
                 if apply_drift and s == 4:
-                    ep = maybe_apply_drift(ep, probability=0.4)
+                    ep = maybe_apply_drift(ep, probability=0.4, seed=seed)
                 return ep
 
         raise RuntimeError("No episodes available in any stage!")

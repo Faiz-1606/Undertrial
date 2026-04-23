@@ -81,12 +81,21 @@ class UndertriAIEnvironment(Environment):
         """Start a new episode. Returns initial case observation."""
         self._reset_rubric() if hasattr(self, '_reset_rubric') else None
         s = stage or self._current_stage
-        self._episode    = self.dataset.sample_episode(stage=s, seed=seed)
-        self._episode_id = episode_id or str(uuid.uuid4())
-        self._step_count = 0
-        self._flags      = []
-        self._retrieved_precedents = []
-        self._action_history: List[str] = []  # accumulated tool results (Gap 4)
+
+        # reset() timeout guard — prevent infinite hang on slow dataset.sample_episode()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(self.dataset.sample_episode, s, True, seed)
+            try:
+                self._episode = fut.result(timeout=5.0)
+            except concurrent.futures.TimeoutError:
+                raise RuntimeError("reset() timed out after 5s — check dataset loading.")
+
+        self._episode_id    = episode_id or str(uuid.uuid4())
+        self._step_count    = 0
+        self._flags         = []
+        self._retrieved_precedents  = []
+        self._action_history: List[str] = []
+        self._statutory_tool_called: bool = False  # M2: process reward tracking
         return self._make_observation(action_result=None)
 
     def step(
@@ -103,9 +112,9 @@ class UndertriAIEnvironment(Environment):
 
         # ---- Terminal action: submit memo ----
         if isinstance(action, SubmitMemoAction):
-            # Penalty for skipping all tool calls (tool_skip_bypass fix)
-            # Agent must use at least 1 tool before submitting or lose 0.15
-            no_tool_penalty = 0.15 if self._step_count == 1 else 0.0
+            # Penalty for skipping all tool calls
+            # Increased to 0.40 so instant-submit can never be profitable by chance
+            no_tool_penalty = 0.40 if self._step_count == 1 else 0.0
 
             reward_dict = compute_reward(
                 agent_outcome     = action.recommended_outcome,
@@ -114,8 +123,9 @@ class UndertriAIEnvironment(Environment):
                 agent_computation = action.statutory_computation,
                 agent_conditions  = action.recommended_conditions or [],
                 episode           = self._episode,
-                step_count        = self._step_count,   # Gap 5: efficiency reward
+                step_count        = self._step_count,
                 max_steps         = self.MAX_STEPS,
+                statutory_tool_used = self._statutory_tool_called,  # M2
             )
             # Apply skip penalty (can push total legitimately negative)
             reward_dict["total_reward"] = round(reward_dict["total_reward"] - no_tool_penalty, 4)
@@ -133,6 +143,9 @@ class UndertriAIEnvironment(Environment):
             )
 
         # ---- Tool actions with optional timeout enforcement ----
+        if isinstance(action, ComputeStatutoryEligibilityAction):
+            self._statutory_tool_called = True  # M2: track for process reward
+
         if timeout_s is not None:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(self._dispatch_tool, action)

@@ -121,8 +121,8 @@ class SubmitMemoAction(Action):
     )
 
     # Recommendation
-    recommended_outcome: Literal["Bail Granted", "Bail Denied", "Bail Conditional"] = Field(
-        ..., description="Final recommendation: Bail Granted | Bail Denied | Bail Conditional (strict conditions)"
+    recommended_outcome: Literal["Bail Granted", "Bail Denied"] = Field(
+        ..., description="Final recommendation: Bail Granted | Bail Denied"
     )
     recommended_conditions: Optional[List[str]] = Field(
         None,

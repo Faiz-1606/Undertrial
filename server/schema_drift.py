@@ -6,7 +6,7 @@ cross-state FIR format variation, testing agent robustness.
 
 import random
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 random.seed(42)
 
@@ -140,8 +140,21 @@ def apply_schema_drift(episode: Dict[str, Any], drift_type: str = "auto") -> Dic
     return ep
 
 
-def maybe_apply_drift(episode: Dict[str, Any], probability: float = 0.25) -> Dict[str, Any]:
-    """Apply drift with the given probability (used during Stage 4 training)."""
-    if episode.get("schema_drift_eligible") and random.random() < probability:
+def maybe_apply_drift(
+    episode: Dict[str, Any],
+    probability: float = 0.25,
+    seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Apply drift with the given probability (used during Stage 4 training).
+
+    Args:
+        probability: Chance of applying drift (0.0–1.0).
+        seed: If provided, uses a local RNG so drift is fully deterministic.
+              Pass the same seed that was used for episode selection.
+    """
+    if not episode.get("schema_drift_eligible"):
+        return episode
+    rng = random.Random(seed) if seed is not None else random
+    if rng.random() < probability:
         return apply_schema_drift(episode)
     return episode
