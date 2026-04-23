@@ -30,6 +30,24 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import torch
+
+# ── Fix 1: Import authoritative reward functions from server/reward.py ──────
+# This ensures training optimises the SAME signal the deployed demo evaluates.
+try:
+    _SERVER_ROOT = str(Path(__file__).parent.parent)
+    if _SERVER_ROOT not in sys.path:
+        sys.path.insert(0, _SERVER_ROOT)
+    from server.reward import (
+        compute_outcome_match,
+        compute_flight_risk_accuracy,
+        compute_statutory_accuracy,
+        compute_bias_penalty as _server_bias,
+    )
+    _USE_SERVER_REWARDS = True
+    print("[reward] Using authoritative server/reward.py functions.")
+except ImportError:
+    _USE_SERVER_REWARDS = False
+    print("[reward] server/reward.py not found — using local fallback functions.")
 from datasets import Dataset
 
 # ============================================================
@@ -250,16 +268,30 @@ def combined_reward(
     """
     Master reward combining all components.
     R = 0.4*outcome + 0.2*flight_risk + 0.2*statutory + 0.2*format - 0.3*bias
-    """
-    fmt   = reward_format(completions)
-    out   = reward_outcome_match(completions, episode_batch)
-    fr    = reward_flight_risk(completions, episode_batch)
-    stat  = reward_statutory(completions, episode_batch)
-    bias  = reward_no_bias(completions, episode_batch)
 
+    Uses server/reward.py functions when available (Fix 1).
+    """
+    fmt  = reward_format(completions)
     rewards = []
-    for f, o, r, s, b in zip(fmt, out, fr, stat, bias):
-        total = 0.4*o + 0.2*r + 0.2*s + 0.2*f - 0.3*b
+
+    for comp, ep, f in zip(completions, episode_batch, fmt):
+        parsed = parse_model_output(comp)
+        gt     = ep.get("ground_truth", {})
+
+        if _USE_SERVER_REWARDS:
+            # Use the authoritative server functions
+            o  = compute_outcome_match(parsed["recommended_outcome"], gt)
+            fr = compute_flight_risk_accuracy(parsed["flight_risk"], gt)
+            s  = compute_statutory_accuracy(parsed, ep)
+            b  = _server_bias(parsed, ep)
+        else:
+            # Local fallback
+            o  = reward_outcome_match([comp], [ep])[0]
+            fr = reward_flight_risk([comp], [ep])[0]
+            s  = reward_statutory([comp], [ep])[0]
+            b  = reward_no_bias([comp], [ep])[0]
+
+        total = 0.4*o + 0.2*fr + 0.2*s + 0.2*f - 0.3*b
         rewards.append(round(max(0.0, total), 4))
     return rewards
 
@@ -304,6 +336,41 @@ def build_hf_dataset(episodes: List[Dict], tokenizer) -> Dataset:
 # CELL 6 — Training
 # ============================================================
 
+# ── Fix 3: Generation Inspection Callback ───────────────────────────────────
+try:
+    from transformers import TrainerCallback  # type: ignore
+
+    class GenerationInspectionCallback(TrainerCallback):
+        """Prints 2 raw model completions every 25 steps to catch reward hacking."""
+        def __init__(self, tokenizer, dataset, every_n_steps=25):
+            self.tokenizer    = tokenizer
+            self.dataset      = dataset
+            self.every_n      = every_n_steps
+            self._sample_idxs = random.sample(range(len(dataset)), min(2, len(dataset)))
+
+        def on_step_end(self, args, state, control, model=None, **kwargs):
+            if state.global_step % self.every_n != 0 or model is None:
+                return
+            print(f"\n{'─'*60}")
+            print(f"[InspectionCallback] Step {state.global_step} — sample completions:")
+            from unsloth import FastLanguageModel  # type: ignore
+            FastLanguageModel.for_inference(model)
+            for idx in self._sample_idxs:
+                row = self.dataset[idx]
+                inputs = self.tokenizer(
+                    row["prompt"], return_tensors="pt", truncation=True, max_length=1024
+                ).to(model.device)
+                with torch.no_grad():
+                    out = model.generate(**inputs, max_new_tokens=200, do_sample=False)
+                text = self.tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+                gt = row.get("ground_truth", "?")
+                print(f"  [GT={gt}] {text[:300]}...")
+            FastLanguageModel.for_training(model)
+            print(f"{'─'*60}\n")
+except ImportError:
+    GenerationInspectionCallback = None
+
+
 def train(
     episodes_dir: str = "./data/episodes",
     output_dir:   str = "./output/undertrial_grpo",
@@ -313,6 +380,7 @@ def train(
     grad_accum:   int = 4,
     lr:           float = 5e-6,
     max_seq_len:  int = 3072,
+    eval_after:   bool = False,
 ):
     print("=" * 60)
     print("  UndertriAI — GRPO Training with Unsloth")
@@ -372,26 +440,62 @@ def train(
         remove_unused_columns   = False,
     )
 
+    # ── Fix 2: Baseline eval BEFORE training ─────────────────
+    print("\nRunning baseline evaluation (before training)...")
+    baseline_reward = evaluate_baseline(episodes_dir, n_samples=20)
+    print(f"Baseline reward: {baseline_reward:.4f}")
+
     # ── Trainer ──────────────────────────────────────────────
+    callbacks = []
+    if GenerationInspectionCallback is not None:
+        callbacks.append(GenerationInspectionCallback(tokenizer, dataset, every_n_steps=25))
+
     trainer = GRPOTrainer(
-        model          = model,
+        model            = model,
         processing_class = tokenizer,
-        config         = config,
-        train_dataset  = dataset,
-        reward_funcs   = [reward_fn],
+        config           = config,
+        train_dataset    = dataset,
+        reward_funcs     = [reward_fn],
+        callbacks        = callbacks,
     )
 
     print("\nStarting GRPO training...")
-    print(f"  Steps: {max_steps} | Batch: {batch_size} × {grad_accum} grad_accum")
+    print(f"  Steps: {max_steps} | Batch: {batch_size} x {grad_accum} grad_accum")
     print(f"  Generations per prompt: 6 | KL beta: 0.01")
+    print(f"  Inspection callback: every 25 steps")
     print()
 
     trainer.train()
 
-    # ── Save ─────────────────────────────────────────────────
+    # ── Fix 2: Post-training eval + results.json ──────────────
+    post_reward = None
+    if eval_after:
+        print("\nRunning post-training evaluation...")
+        post_reward = evaluate_baseline(episodes_dir, n_samples=20)
+        print(f"Post-training reward: {post_reward:.4f}")
+        print(f"Improvement: {baseline_reward:.4f} → {post_reward:.4f} (+{post_reward-baseline_reward:.4f})")
+
+    results = {
+        "stage":          stage,
+        "max_steps":      max_steps,
+        "baseline_reward": round(baseline_reward, 4),
+        "post_reward":    round(post_reward, 4) if post_reward is not None else None,
+        "delta":          round(post_reward - baseline_reward, 4) if post_reward else None,
+        "training_log":   [
+            {k: v for k, v in e.items() if isinstance(v, (int, float, str))}
+            for e in trainer.state.log_history
+        ],
+    }
+    results_path = Path(output_dir) / "results.json"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    results_path.write_text(json.dumps(results, indent=2))
+    print(f"\nResults saved to {results_path}")
+
+    # ── Save model ────────────────────────────────────────────
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    print(f"\n✅ Model saved to {output_dir}")
+    print(f"\nModel saved to {output_dir}")
+    return results
 
 
 # ============================================================
@@ -451,8 +555,10 @@ if __name__ == "__main__":
     parser.add_argument("--stage",        type=int, default=1)
     parser.add_argument("--steps",        type=int, default=200)
     parser.add_argument("--batch_size",   type=int, default=4)
-    parser.add_argument("--baseline_only",action="store_true",
+    parser.add_argument("--baseline_only", action="store_true",
                         help="Only run baseline evaluation, skip training")
+    parser.add_argument("--eval_after",    action="store_true",
+                        help="Run evaluation after training to measure improvement")
     args = parser.parse_args()
 
     if args.baseline_only:
@@ -464,4 +570,5 @@ if __name__ == "__main__":
             stage        = args.stage,
             max_steps    = args.steps,
             batch_size   = args.batch_size,
+            eval_after   = args.eval_after,
         )
