@@ -56,6 +56,7 @@ class UndertriAIEnvironment(Environment):
         episodes_dir: Optional[str] = None,
         initial_stage: int = 1,
     ):
+        super().__init__()  # Sets self.rubric = None and self.transform = None
         self.dataset     = BailDataset(episodes_dir=episodes_dir)
         self.precedents  = PrecedentDB()
         self._episode: Optional[Dict[str, Any]] = None
