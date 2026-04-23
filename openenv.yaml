@@ -27,23 +27,31 @@ environment:
 
 actions:
   - name: request_document
-    description: Request a missing case document
+    description: Request a missing case document (FIR, charge sheet, prior judgment)
   - name: flag_inconsistency
     description: Flag a legal inconsistency in the charge or prosecution argument
   - name: cross_reference_precedent
-    description: Retrieve a relevant landmark precedent
+    description: Retrieve a relevant landmark SC/HC precedent
   - name: compute_statutory_eligibility
-    description: Check default bail eligibility under IPC/BNSS
+    description: Check BNSS 479 default bail eligibility (custody vs. max sentence)
   - name: assess_surety
     description: Evaluate financial viability of proposed surety
   - name: classify_bail_type
     description: Determine bail type from grounds for/against
+  - name: read_submissions
+    description: Read and summarise prosecution or defence submissions on record
+  - name: assess_flight_risk
+    description: Systematic flight risk assessment using a structured scoring matrix
+  - name: check_case_factors
+    description: Examine specific case factors (parity, evidence tampering, victim vulnerability)
+  - name: apply_proportionality
+    description: Apply BNSS 479 proportionality — custody vs. max sentence vs. trial timeline
   - name: submit_memo
     description: "TERMINAL — Submit structured bail assessment memo"
 
 reward:
-  formula: "0.4*outcome_match + 0.2*flight_risk_acc + 0.2*statutory_acc + 0.2*condition_acc - 0.3*bias_score"
-  range: [0.0, 1.0]
+  formula: "0.4*outcome + 0.2*flight_risk + 0.2*statutory + 0.2*conditions + 0.1*efficiency + 0.05*process_bonus - 0.3*bias"
+  range: [-0.7, 1.15]
   terminal_action: submit_memo
   deterministic: true
   llm_as_judge: false

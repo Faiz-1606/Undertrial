@@ -8,7 +8,6 @@ import random
 import re
 from typing import Any, Dict, Optional
 
-random.seed(42)
 
 # ---------------------------------------------------------------------------
 # IPC → BNSS Section Remapping (Bharatiya Nyaya Sanhita 2023)
