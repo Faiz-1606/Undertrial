@@ -74,7 +74,7 @@ class BailDataset:
                     "Investigation is still pending and accused may tamper with evidence.",
                 ],
                 "defence_arguments": [
-                    "Accused has been in custody for 8 months on a 7-year max offence — already served more than half the equivalent.",
+                    "Accused has been in custody for 8 months; threshold under BNSS 479 for a 7-year offence is 42 months — not yet met. Bail is sought on community ties and clean record, not statutory default.",
                     "No prior criminal record. Permanent resident of Delhi with family ties.",
                     "No evidence of flight risk or evidence tampering.",
                 ],

@@ -656,10 +656,10 @@ def train(
     results_path.write_text(json.dumps(results, indent=2))
     print(f"\nResults saved to {results_path}")
 
-    # ── Save model ────────────────────────────────────────────
-    model.save_pretrained(output_dir)
+    # Save LoRA adapters only — safe for 4-bit quantized models
+    model.save_pretrained(output_dir, save_adapters_only=True)
     tokenizer.save_pretrained(output_dir)
-    print(f"\nModel saved to {output_dir}")
+    print(f"\nModel adapters saved to {output_dir}")
     return results
 
 
@@ -904,7 +904,10 @@ def train_curriculum(
 
         def reward_fn(completions: List[str], episode: List[str], **kwargs) -> List[float]:
             ep_objs = [json.loads(e) for e in episode]
-            return combined_reward(completions, ep_objs)
+            # Pass step_count=1 for curriculum training (single-shot XML, no multi-step env loop)
+            # This keeps efficiency contribution honest rather than silently 0.0
+            step_counts = [1] * len(completions)
+            return combined_reward(completions, ep_objs, step_counts=step_counts)
 
         stage_output = f"{output_dir}/stage_{stage}"
         config = GRPOConfig(
@@ -923,6 +926,11 @@ def train_curriculum(
             report_to="none",
             remove_unused_columns=False,
         )
+
+        # ── Switch model back to training mode before trainer.train() ──
+        # evaluate_on_stage calls FastLanguageModel.for_inference(model);
+        # without this reset, stages 2-4 train in inference mode silently.
+        FastLanguageModel.for_training(model)
 
         trainer = GRPOTrainer(
             model=model,
@@ -963,10 +971,11 @@ def train_curriculum(
             print(f"  ✗ Stage {stage} below threshold ({post_reward:.2f} < {threshold:.2f})")
             print(f"  → Continuing to next stage anyway (curriculum mode)")
 
-        # Save checkpoint after each stage
-        model.save_pretrained(stage_output)
+        # Save LoRA adapters only — safe for 4-bit models (save_pretrained_merged
+        # requires a full merge which can OOM on T4)
+        model.save_pretrained(stage_output, save_adapters_only=True)
         tokenizer.save_pretrained(stage_output)
-        print(f"  Checkpoint saved: {stage_output}")
+        print(f"  Checkpoint saved (adapters): {stage_output}")
 
     # ── Final summary ──
     print(f"\n{'═' * 60}")
@@ -978,11 +987,11 @@ def train_curriculum(
               f"(Δ = {r['delta']:+.4f})")
     print(f"  Total traces harvested: {len(accumulated_traces)}")
 
-    # Save final model
+    # Save final model (adapters only — merge separately if needed)
     final_dir = f"{output_dir}/final"
-    model.save_pretrained(final_dir)
+    model.save_pretrained(final_dir, save_adapters_only=True)
     tokenizer.save_pretrained(final_dir)
-    print(f"\n  Final model saved: {final_dir}")
+    print(f"\n  Final model saved (adapters): {final_dir}")
 
     # Save results
     results_path = Path(output_dir) / "curriculum_results.json"
