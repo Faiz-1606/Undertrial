@@ -160,6 +160,16 @@ def compute_statutory_accuracy(
 
     score = 0.0
 
+    # B9: Infer special law from crime_type when the special_laws field is empty.
+    # All 134 narcotics episodes have special_laws="" but should be NDPS-restricted.
+    CRIME_TYPE_SPECIAL_LAWS = [
+        "narcotics", "ndps", "pocso", "uapa", "pmla",
+        "terrorism", "organised crime", "money laundering",
+    ]
+    crime_type_lower = episode.get("crime_type", "").lower()
+    if not special_laws and any(t in crime_type_lower for t in CRIME_TYPE_SPECIAL_LAWS):
+        special_laws = "INFERRED"  # Treat as special-law-restricted for eligibility
+
     # Compute ground-truth eligibility for cases with known custody duration
     half_sent_months = (max_sent * 12) / 2
     truly_eligible   = (custody_mo >= half_sent_months) and not special_laws
@@ -184,14 +194,17 @@ def compute_statutory_accuracy(
                 hits += 1
         score += 0.3 * min(1.0, hits / len(sections))
 
-    # 30%: showed numeric math AND referenced time/sentence language
+    # 30%: showed numeric math AND referenced time/sentence language.
+    # B3: Gate on direction: full credit only when eligibility direction is correct.
+    # Wrong-direction agents get partial credit (0.10) for showing work — not 0.30.
+    direction_correct = (agent_eligible == truly_eligible)
     has_numbers  = bool(re.search(r'\d+', comp))
     has_time_ref = any(w in comp for w in TIME_WORDS)
 
     if has_numbers and has_time_ref:
-        score += 0.3
+        score += 0.3 if direction_correct else 0.10
     elif has_numbers or has_time_ref:
-        score += 0.15
+        score += 0.15 if direction_correct else 0.05
 
     return min(1.0, score)
 

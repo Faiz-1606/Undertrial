@@ -85,21 +85,36 @@ class UndertriAIEnvironment(Environment):
         """Start a new episode. Returns initial case observation."""
         s = stage or self._current_stage
 
-        # reset() timeout guard — prevent infinite hang on slow dataset.sample_episode()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(self.dataset.sample_episode, s, True, seed)
-            try:
-                self._episode = fut.result(timeout=5.0)
-            except concurrent.futures.TimeoutError:
-                raise RuntimeError("reset() timed out after 5s — check dataset loading.")
+        # A8 fix: if episode_id is given, look up that specific case by case_id.
+        # Previously episode_id was stored but episode was always sampled randomly.
+        found_episode = None
+        if episode_id is not None:
+            for stage_eps in self.dataset._episodes.values():
+                for ep in stage_eps:
+                    if ep.get("case_id") == episode_id:
+                        found_episode = ep
+                        break
+                if found_episode:
+                    break
+
+        if found_episode:
+            self._episode = found_episode
+        else:
+            # Timeout guard — prevent infinite hang on slow dataset.sample_episode()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(self.dataset.sample_episode, s, True, seed)
+                try:
+                    self._episode = fut.result(timeout=5.0)
+                except concurrent.futures.TimeoutError:
+                    raise RuntimeError("reset() timed out after 5s — check dataset loading.")
 
         self._episode_id    = episode_id or str(uuid.uuid4())
         self._step_count    = 0
         self._flags         = []
         self._retrieved_precedents  = []
         self._action_history: List[str] = []
-        self._statutory_tool_called: bool = False  # process reward tracking
-        self._tools_called: set = set()  # 5B.2: track unique tool types for repeat detection
+        self._statutory_tool_called: bool = False
+        self._tools_called: set = set()
         return self._make_observation(action_result=None)
 
     def step(

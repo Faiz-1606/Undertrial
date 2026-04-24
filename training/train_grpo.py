@@ -615,9 +615,10 @@ def train(
         remove_unused_columns   = False,
     )
 
-    # ── Fix 2: Baseline eval BEFORE training ─────────────────
+    # A3 fix: reuse the already-loaded model — evaluate_baseline() loads a second
+    # FastLanguageModel internally which OOMs on T4 with a model already in memory.
     print("\nRunning baseline evaluation (before training)...")
-    baseline_reward = evaluate_baseline(episodes_dir, n_samples=20)
+    baseline_reward, _ = evaluate_on_stage(model, tokenizer, episodes_dir, stage=stage, n_samples=20)
     print(f"Baseline reward: {baseline_reward:.4f}")
 
     # ── Trainer ──────────────────────────────────────────────
@@ -646,7 +647,8 @@ def train(
     post_reward = None
     if eval_after:
         print("\nRunning post-training evaluation...")
-        post_reward = evaluate_baseline(episodes_dir, n_samples=20)
+        # A3 fix: reuse model, no second load
+        post_reward, _ = evaluate_on_stage(model, tokenizer, episodes_dir, stage=stage, n_samples=20)
         print(f"Post-training reward: {post_reward:.4f}")
         print(f"Improvement: {baseline_reward:.4f} → {post_reward:.4f} (+{post_reward-baseline_reward:.4f})")
 
