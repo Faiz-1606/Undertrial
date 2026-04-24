@@ -307,11 +307,12 @@ class UndertriAIEnvironment(Environment):
 
         elif isinstance(action, AssessSuretyAction):
             feasible = action.proposed_amount <= (action.income_estimate or 50000) * 3
+            income_str = f"₹{action.income_estimate:,}/month" if action.income_estimate is not None else "Not provided"
             return (
                 f"Surety Assessment:\n"
                 f"  Proposed Amount: ₹{action.proposed_amount:,}\n"
                 f"  Accused Occupation: {action.accused_occupation}\n"
-                f"  Income Estimate: ₹{action.income_estimate:,}/month\n"
+                f"  Income Estimate: {income_str}\n"
                 f"  → {'FINANCIALLY FEASIBLE ✓' if feasible else 'AMOUNT MAY BE EXCESSIVE — consider reduction'}"
             )
 

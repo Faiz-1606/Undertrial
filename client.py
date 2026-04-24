@@ -19,7 +19,7 @@ from .models import (
     AssessSuretyAction, ClassifyBailTypeAction,
     ReadSubmissionsAction, AssessFlightRiskAction,
     CheckCaseFactorsAction, ApplyProportionalityAction,
-    SubmitMemoAction,
+    PullCriminalHistoryAction, SubmitMemoAction,
     StepResult,
 )
 
@@ -141,5 +141,6 @@ __all__ = [
     "AssessFlightRiskAction",
     "CheckCaseFactorsAction",
     "ApplyProportionalityAction",
+    "PullCriminalHistoryAction",
     "SubmitMemoAction",
 ]

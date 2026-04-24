@@ -4,6 +4,7 @@ Wraps UndertriAIEnvironment as an OpenEnv-compatible HTTP + WebSocket server.
 """
 
 import os
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,6 +13,8 @@ from fastapi.responses import JSONResponse, HTMLResponse
 import json
 import uuid
 from typing import List, Optional
+
+logger = logging.getLogger("undertrial")
 
 from .undertrial_environment import UndertriAIEnvironment
 from .performance_tracker import PerformanceTracker
@@ -215,6 +218,11 @@ def step(payload: dict):
                         v["curriculum_stage"] = stage
                         env.dataset._episodes.setdefault(stage, []).append(v)
                     session.synthetic_cases_generated += len(variants)
+                    for v in variants:
+                        logger.info(
+                            f"Synthetic case generated: {v['case_id']} "
+                            f"({v.get('perturbation_type', 'unknown')})"
+                        )
 
     return {
         "session_id": session_id,
@@ -255,6 +263,7 @@ def list_tools():
             {"name": "assess_flight_risk",           "description": "Systematic flight risk assessment with scoring matrix"},
             {"name": "check_case_factors",           "description": "Examine specific case factors (parity, evidence tampering, victim vulnerability)"},
             {"name": "apply_proportionality",        "description": "Apply BNSS 479 proportionality: custody vs. max sentence vs. trial timeline"},
+            {"name": "pull_criminal_history",        "description": "Pull accused's prior criminal record, bail history, and conviction status"},
             {"name": "submit_memo",                  "description": "TERMINAL — Submit structured bail assessment memo"},
         ]
     }
@@ -337,7 +346,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     AssessSuretyAction, ClassifyBailTypeAction,
                     ReadSubmissionsAction, AssessFlightRiskAction,
                     CheckCaseFactorsAction, ApplyProportionalityAction,
-                    SubmitMemoAction,
+                    PullCriminalHistoryAction, SubmitMemoAction,
                 )
                 ACTION_MAP = {
                     "request_document":              RequestDocumentAction,
@@ -350,6 +359,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     "assess_flight_risk":            AssessFlightRiskAction,
                     "check_case_factors":            CheckCaseFactorsAction,
                     "apply_proportionality":         ApplyProportionalityAction,
+                    "pull_criminal_history":         PullCriminalHistoryAction,
                     "submit_memo":                   SubmitMemoAction,
                 }
                 action_cls = ACTION_MAP.get(tool_name)

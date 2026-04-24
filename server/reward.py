@@ -208,6 +208,11 @@ def compute_statutory_accuracy(
             return 0.0
 
     # ── Standard IPC/BNSS statutory scoring ──────────────────────────────
+    # D4: Detect unreliable custody_months=6.0 default on serious crimes.
+    # 74% of episodes have custody_months=6.0 which may be a dataset default.
+    # Cap score at 0.60 to avoid rewarding threshold arithmetic on unreliable data.
+    custody_unreliable = (custody_mo == 6.0 and max_sent > 3.0)
+
     # Compute ground-truth eligibility for cases with known custody duration
     half_sent_months = (max_sent * 12) / 2
     truly_eligible   = (custody_mo >= half_sent_months) and not special_laws
@@ -243,6 +248,10 @@ def compute_statutory_accuracy(
         score += 0.3 if direction_correct else 0.10
     elif has_numbers or has_time_ref:
         score += 0.15 if direction_correct else 0.05
+
+    # D4: Cap score when custody data is unreliable (likely dataset default)
+    if custody_unreliable:
+        score = min(score, 0.60)
 
     return min(1.0, score)
 

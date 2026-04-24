@@ -37,6 +37,9 @@ class PerformanceTracker:
 
     Thread-safe for single-session use (no locks needed).
     All public methods handle missing/malformed input gracefully.
+
+    NOTE: Tracker state is in-memory only. Server restart clears history.
+    For production: persist via tracker.get_profile() → JSON file on /reset.
     """
 
     def __init__(self, alpha: float = 0.1):

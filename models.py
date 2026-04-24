@@ -200,6 +200,7 @@ BailAction = Union[
     AssessFlightRiskAction,
     CheckCaseFactorsAction,
     ApplyProportionalityAction,
+    PullCriminalHistoryAction,
     SubmitMemoAction,
 ]
 

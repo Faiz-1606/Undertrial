@@ -1,6 +1,6 @@
 """
 UndertriAI — GRPO Training Script
-Fine-tunes Qwen2.5-7B-Instruct using Group Relative Policy Optimization
+Fine-tunes Qwen2.5-3B-Instruct using Group Relative Policy Optimization
 against the UndertriAI bail assessment environment.
 
 Run in Google Colab (T4 GPU recommended):
@@ -373,8 +373,13 @@ def reward_conditions(completions: List[str], episode_batch: List[Dict], **kwarg
                 if kw in cond_text:
                     score = min(1.0, score + 0.04)
         else:
-            # Denial should have empty conditions
-            score = 1.0 if len(conditions) == 0 else 0.5
+            # Denial: empty conditions is correct ONLY when GT also denied
+            gt_outcome = ep.get("ground_truth", {}).get("outcome", "").lower()
+            gt_denied = "deni" in gt_outcome
+            if len(conditions) == 0:
+                score = 1.0 if gt_denied else 0.3  # H3: 0.3 not 1.0 when GT=granted
+            else:
+                score = 0.5  # Denied but listed conditions — inconsistent
         scores.append(min(1.0, score))
     return scores
 
@@ -508,12 +513,19 @@ def load_episodes(
         test   = last test_fraction
     """
     path = Path(episodes_dir) / f"episodes_stage_{stage}.jsonl"
+    use_all_fallback = False
     if not path.exists():
         path = Path(episodes_dir) / "episodes_all.jsonl"
+        use_all_fallback = True
     if not path.exists():
         raise FileNotFoundError(f"No episodes found in {episodes_dir}.")
     with open(path, encoding="utf-8") as f:
         all_eps = [json.loads(l) for l in f if l.strip()]
+    # H1: filter by curriculum_stage when falling back to episodes_all.jsonl
+    if use_all_fallback:
+        filtered = [ep for ep in all_eps if ep.get("curriculum_stage") == stage]
+        if filtered:
+            all_eps = filtered
 
     n = len(all_eps)
     n_test = max(1, int(n * test_fraction))
@@ -678,14 +690,14 @@ def train(
 ):
     print("=" * 60)
     print("  UndertriAI — GRPO Training with Unsloth")
-    print(f"  Model: Qwen2.5-7B-Instruct | Stage: {stage}")
+    print(f"  Model: Qwen2.5-3B-Instruct | Stage: {stage}")
     print("=" * 60)
 
     # ── Load model ──────────────────────────────────────────
     from unsloth import FastLanguageModel  # type: ignore
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name   = "unsloth/Qwen2.5-7B-Instruct",
+        model_name   = "unsloth/Qwen2.5-3B-Instruct",
         max_seq_length = max_seq_len,
         load_in_4bit = True,
         fast_inference = False,
@@ -791,7 +803,85 @@ def train(
     model.save_pretrained(output_dir, save_adapters_only=True)
     tokenizer.save_pretrained(output_dir)
     print(f"\nModel adapters saved to {output_dir}")
+
+    # Save training plots (C6)
+    save_training_plots(trainer.state.log_history, output_dir)
+
     return results
+
+
+
+# ============================================================
+# Plot saving utility (C6)
+# ============================================================
+
+def save_training_plots(log_history: list, output_dir: str) -> None:
+    """
+    Save training reward curve and loss plots.
+    Called at the end of train(), train_curriculum(), and train_adaptive().
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # Non-interactive backend
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("[WARNING] matplotlib not installed — skipping plot generation.")
+        return
+
+    plots_dir = Path(output_dir) / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # Extract reward data from training log
+    steps   = [e["step"]   for e in log_history if "reward" in e]
+    rewards = [e["reward"] for e in log_history if "reward" in e]
+
+    if not steps:
+        print("[WARNING] No reward data in training log — skipping plots.")
+        return
+
+    # Plot 1: Reward curve
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor("#0a0d1a")
+    ax.set_facecolor("#0a0d1a")
+    ax.plot(steps, rewards, color="#6366f1", linewidth=1.5, alpha=0.6, label="Raw")
+    if len(rewards) > 5:
+        smooth = np.convolve(rewards, np.ones(5) / 5, mode="valid")
+        ax.plot(steps[2:-2], smooth, color="#14b8a6", linewidth=2, label="Smoothed")
+    ax.set_xlabel("Training Step", color="#94a3b8")
+    ax.set_ylabel("Reward", color="#94a3b8")
+    ax.set_title("UndertriAI — Training Reward Curve", color="#e2e8f0", pad=12)
+    ax.tick_params(colors="#94a3b8")
+    ax.grid(True, alpha=0.2)
+    ax.legend(facecolor="#111827", edgecolor="#1e2d45", labelcolor="#94a3b8")
+    for spine in ax.spines.values():
+        spine.set_color("#1e2d45")
+    fig.tight_layout()
+    reward_path = plots_dir / "reward_curve.png"
+    fig.savefig(str(reward_path), dpi=150, bbox_inches="tight", facecolor="#0a0d1a")
+    plt.close(fig)
+    print(f"  Plot saved: {reward_path}")
+
+    # Plot 2: Loss curve (if available)
+    loss_steps  = [e["step"] for e in log_history if "loss" in e]
+    loss_values = [e["loss"] for e in log_history if "loss" in e]
+    if loss_steps:
+        fig2, ax2 = plt.subplots(figsize=(10, 5))
+        fig2.patch.set_facecolor("#0a0d1a")
+        ax2.set_facecolor("#0a0d1a")
+        ax2.plot(loss_steps, loss_values, color="#f97316", linewidth=1.5)
+        ax2.set_xlabel("Training Step", color="#94a3b8")
+        ax2.set_ylabel("Loss", color="#94a3b8")
+        ax2.set_title("UndertriAI — Training Loss", color="#e2e8f0", pad=12)
+        ax2.tick_params(colors="#94a3b8")
+        ax2.grid(True, alpha=0.2)
+        for spine in ax2.spines.values():
+            spine.set_color("#1e2d45")
+        fig2.tight_layout()
+        loss_path = plots_dir / "training_loss.png"
+        fig2.savefig(str(loss_path), dpi=150, bbox_inches="tight", facecolor="#0a0d1a")
+        plt.close(fig2)
+        print(f"  Plot saved: {loss_path}")
 
 
 # ============================================================
@@ -800,14 +890,14 @@ def train(
 
 def evaluate_baseline(episodes_dir: str, n_samples: int = 20):
     """
-    Quick evaluation of a zero-shot Qwen2.5-7B-Instruct on bail cases.
+    Quick evaluation of a zero-shot Qwen2.5-3B-Instruct on bail cases.
     Run this BEFORE training to get the baseline reward curve starting point.
     """
     print("\nEvaluating zero-shot baseline...")
     from unsloth import FastLanguageModel  # type: ignore
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name   = "unsloth/Qwen2.5-7B-Instruct",
+        model_name   = "unsloth/Qwen2.5-3B-Instruct",
         max_seq_length = 3072,
         load_in_4bit = True,
     )
@@ -970,7 +1060,7 @@ def train_curriculum(
 
     # Load model once — reused across all stages
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen2.5-7B-Instruct",
+        model_name="unsloth/Qwen2.5-3B-Instruct",
         max_seq_length=3072,
         load_in_4bit=True,
         fast_inference=False,
@@ -1131,6 +1221,12 @@ def train_curriculum(
     }, indent=2))
     print(f"  Results saved: {results_path}")
 
+    # Save training plots (C6) — use last trainer's log
+    try:
+        save_training_plots(trainer.state.log_history, output_dir)
+    except Exception:
+        print("  [WARNING] Could not save training plots.")
+
     return stage_results
 
 
@@ -1175,7 +1271,7 @@ def train_adaptive(
 
     # Load model once
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen2.5-7B-Instruct",
+        model_name="unsloth/Qwen2.5-3B-Instruct",
         max_seq_length=3072,
         load_in_4bit=True,
         fast_inference=False,
@@ -1371,6 +1467,11 @@ def train_adaptive(
     model.save_pretrained(final_dir, save_adapters_only=True)
     tokenizer.save_pretrained(final_dir)
     print(f"  Final model saved: {final_dir}")
+
+    # Save training plots (C6)
+    # Build a synthetic log_history from reward_curve for adaptive mode
+    adaptive_log = [{"step": s, "reward": r} for s, r in reward_curve]
+    save_training_plots(adaptive_log, output_dir)
 
     return results
 
