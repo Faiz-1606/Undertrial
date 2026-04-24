@@ -142,6 +142,43 @@ class PullCriminalHistoryAction(Action):
         default=True, description="Whether to include prior bail applications and outcomes"
     )
 
+class IssueOrderAction(Action):
+    """
+    TERMINAL ACTION — Issue a bail order (Block 4.3 spec alias for submit_memo).
+
+    Maps order_type to recommended_outcome:
+      grant       → Bail Granted
+      deny        → Bail Denied
+      conditional → Bail Granted (conditions must be provided)
+
+    This is the short-form action compatible with the OpenEnv compliance
+    checklist spec (`issue_order(grant | deny | conditional)`). Use
+    submit_memo for the full structured memo form.
+    """
+    tool_name: Literal["issue_order"] = "issue_order"
+    order_type: Literal["grant", "deny", "conditional"] = Field(
+        ..., description="Type of bail order: grant | deny | conditional"
+    )
+    flight_risk: Literal["Low", "Medium", "High"] = Field(
+        ..., description="Flight risk classification"
+    )
+    flight_risk_justification: str = Field(
+        ..., description="Justification for flight risk assessment referencing case facts"
+    )
+    statutory_eligible: bool = Field(
+        ..., description="Whether accused qualifies for default bail under statute"
+    )
+    statutory_computation: str = Field(
+        ..., description="Computation: section → max sentence → threshold → custody served"
+    )
+    grounds_for_bail: List[str] = Field(..., description="Grounds supporting bail")
+    grounds_against_bail: List[str] = Field(..., description="Grounds opposing bail")
+    recommended_conditions: Optional[List[str]] = Field(
+        None, description="Bail conditions (required when order_type='conditional')"
+    )
+    confidence: Literal["High", "Medium", "Low"] = "Medium"
+
+
 class SubmitMemoAction(Action):
     """
     TERMINAL ACTION — Submit the structured bail assessment memo.
@@ -201,6 +238,7 @@ BailAction = Union[
     CheckCaseFactorsAction,
     ApplyProportionalityAction,
     PullCriminalHistoryAction,
+    IssueOrderAction,   # Block 4.3: spec-compliant alias for submit_memo
     SubmitMemoAction,
 ]
 

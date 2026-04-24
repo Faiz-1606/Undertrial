@@ -234,7 +234,7 @@ else:
     --episodes_dir ./data/episodes \
     --stage 1 \
     --steps 200 \
-    --batch_size 4 \
+    --batch_size 1 \
     --eval_after
 
 # ============================================================
@@ -244,7 +244,7 @@ else:
     --episodes_dir ./data/episodes \
     --curriculum \
     --steps 150 \
-    --batch_size 4
+    --batch_size 1
 
 # ============================================================
 # STEP 4 — Option C: Adaptive training (Theme 4, ~60 min on T4)
@@ -263,7 +263,7 @@ import time; time.sleep(5)  # Wait for server startup
     --adaptive \
     --episodes_dir ./data/episodes \
     --steps 50 \
-    --batch_size 4 \
+    --batch_size 1 \
     --env_url http://localhost:8000
 
 # ============================================================
@@ -300,11 +300,11 @@ Episode Dataset (JSONL)
         ↓
   Format as chat prompt
         ↓
-  Qwen2.5 generates 6 rollouts
+  Qwen2.5 generates 4 rollouts (T4-safe)
         ↓
   XML parser extracts structured fields
         ↓
-  server/reward.py scores each rollout (deterministic)
+  server/reward.py scores each rollout (deterministic, offline)
         ↓
   GRPO updates model weights
         ↓
@@ -316,6 +316,14 @@ Episode Dataset (JSONL)
         ↓
   [Theme 4] Auto-promote when stage EMA exceeds threshold
 ```
+
+> **Design decision — Offline vs Environment-API scoring**: Training uses
+> offline GRPO (completions are scored locally by `server/reward.py` without
+> a live `/step` API call). This avoids ~200ms network latency per rollout,
+> making a 200-step training run feasible on a free Colab T4 GPU in ~20 minutes.
+> The alternative (`rollout_via_env_api()`) is implemented and available for
+> production training where full environment interaction is required. See
+> `training/train_grpo.py → rollout_via_env_api()` for the env-API path.
 
 ---
 
@@ -375,6 +383,15 @@ undertrial_ai/
 - Delhi, Bombay, Allahabad, Madras, Kerala, and Calcutta HCs
 - Crimes from IPC 420 (cheating) to IPC 302 (murder)
 - Cases annotated with ground-truth outcome, flight risk, bias flags, and parity arguments
+
+**Known dataset characteristics and their impact on training:**
+
+| Characteristic | Value | Training effect |
+|---|---|---|
+| Episodes with `flight_risk = Medium` | ~72% | Model can earn ~0.86 flight risk score by always saying "Medium" — this is a weak learning signal. Stage 3 bias-reversal cases are specifically selected to force non-Medium reasoning. |
+| Episodes with `custody_months = 6.0` | ~74% | Custody arithmetic is less discriminating since most cases share the same duration. The `reasoning_quality` sub-score partially compensates by rewarding exact numerical matches. |
+| Episodes with `bias_flag = True` | ~1% (13 cases) | Rare but high-penalty (−0.3). The parity-argument signal (28% of cases) provides the main bias-mitigation training signal. |
+| Episodes with empty `prosecution_arguments` | ~53% | No prosecution text available for half the dataset — the agent must reason from charge sheet and defence arguments alone. |
 
 ---
 

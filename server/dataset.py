@@ -301,16 +301,48 @@ class BailDataset:
             if 1 <= candidate <= 4 and self._episodes[candidate]:
                 eps = self._episodes[candidate]
                 if seed is not None:
+                    # Deterministic: used by demo / replay
                     idx = seed % len(eps)
+                    ep = eps[idx]
                 else:
-                    idx = self._episode_index[candidate] % len(eps)
-                    self._episode_index[candidate] += 1
-                ep = eps[idx]
+                    # 5A.4 / 5C.6 fix: weighted random sampling
+                    # Bias-flagged and non-Medium flight_risk cases are oversampled
+                    weights = [self._episode_weight(e) for e in eps]
+                    ep = random.choices(eps, weights=weights, k=1)[0]
                 if apply_drift and s == 4:
                     ep = maybe_apply_drift(ep, probability=0.4, seed=seed)
                 return ep
 
         raise RuntimeError("No episodes available in any stage!")
+
+    def _episode_weight(self, ep: Dict) -> float:
+        """
+        Compute sampling weight for a single episode.
+
+        5A.4 / 5C.6 fix: oversample underrepresented signal types so the
+        model doesn't learn degenerate shortcuts:
+          - bias_flag=True cases get 3× weight (only 1% of data; high-penalty signal)
+          - Non-Medium flight_risk cases get 2× weight (72% are Medium; weak signal)
+
+        Base weight is 1.0; weights are multiplicative.
+        """
+        weight = 1.0
+        gt = ep.get("ground_truth", {})
+
+        # Bias oversampling (5A.4): rare but critical training signal
+        if gt.get("bias_flag", False):
+            weight *= 3.0
+
+        # Non-Medium flight_risk oversampling (5C.6)
+        risk_label = (
+            gt.get("implicit_flight_risk") or
+            gt.get("explicit_flight_risk") or
+            ep.get("accused_profile", {}).get("flight_risk", "Medium")
+        )
+        if isinstance(risk_label, str) and risk_label.strip().lower() != "medium":
+            weight *= 2.0
+
+        return weight
 
     def get_all_episodes(self) -> List[Dict[str, Any]]:
         return [ep for eps in self._episodes.values() for ep in eps]

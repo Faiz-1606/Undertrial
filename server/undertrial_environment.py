@@ -38,6 +38,7 @@ from ..models import (
     ReadSubmissionsAction, AssessFlightRiskAction, CheckCaseFactorsAction,
     ApplyProportionalityAction,
     PullCriminalHistoryAction,
+    IssueOrderAction,    # Block 4.3: issue_order(grant|deny|conditional) alias
     SubmitMemoAction,
 )
 from .precedent_db import PrecedentDB
@@ -128,6 +129,25 @@ class UndertriAIEnvironment(Environment):
             raise RuntimeError("Call reset() before step().")
 
         self._step_count += 1
+
+        # ---- Block 4.3: issue_order alias — convert to SubmitMemoAction ----
+        if isinstance(action, IssueOrderAction):
+            _order_map = {
+                "grant":       "Bail Granted",
+                "deny":        "Bail Denied",
+                "conditional": "Bail Granted",  # conditional = granted with conditions
+            }
+            action = SubmitMemoAction(
+                flight_risk=action.flight_risk,
+                flight_risk_justification=action.flight_risk_justification,
+                statutory_eligible=action.statutory_eligible,
+                statutory_computation=action.statutory_computation,
+                grounds_for_bail=action.grounds_for_bail,
+                grounds_against_bail=action.grounds_against_bail,
+                recommended_outcome=_order_map[action.order_type],
+                recommended_conditions=action.recommended_conditions,
+                confidence=action.confidence,
+            )
 
         # ---- Terminal action: submit memo ----
         if isinstance(action, SubmitMemoAction):
@@ -413,21 +433,45 @@ class UndertriAIEnvironment(Environment):
         elif isinstance(action, PullCriminalHistoryAction):
             ep      = self._episode
             profile = ep.get("accused_profile", {})
-            prior   = profile.get("prior_cases", "No prior criminal record on file")
+            prior   = profile.get("prior_cases") or "None"
             bail_type = profile.get("bail_type", "Unknown")
+
+            # 5C.5 fix: parse unstructured prior_cases text into structured output
+            prior_lower = prior.lower().strip()
+            is_clean    = prior_lower in ("none", "nil", "no prior", "no prior record", "none.", "")
+
+            # Infer case count from text
+            import re as _re
+            nums = _re.findall(r'\b(\d+)\s+(?:prior|previous|case)', prior_lower)
+            prior_count = int(nums[0]) if nums else (0 if is_clean else 1)
+
+            # Infer conviction vs acquittal
+            convicted  = any(kw in prior_lower for kw in ("convicted", "conviction", "sentenced"))
+            acquitted  = any(kw in prior_lower for kw in ("acquitted", "acquittal", "discharged"))
+            bail_viol  = any(kw in prior_lower for kw in ("absconded", "jumped bail", "bail cancelled"))
+
             lines = [
-                "Criminal History Report:",
-                f"  Prior cases: {prior}",
-                f"  Bail type context: {bail_type}",
+                "Criminal History Report (5C.5 — Structured):",
+                f"  Raw record:         {prior}",
+                f"  Prior cases:        {prior_count} {'(none)' if is_clean else '(see above)'}",
+                f"  Conviction record:  {'YES' if convicted else 'NO (no conviction on record)'}",
+                f"  Acquittal record:   {'YES' if acquitted else 'NO'}",
+                f"  Bail violation:     {'YES ⚠️' if bail_viol else 'NO'}",
+                f"  Bail type context:  {bail_type}",
             ]
             if action.include_bail_history:
-                # Infer from parity flag and stage whether HC has dealt with bail before
                 parity = ep.get("ground_truth", {}).get("parity_argument_used", False)
                 lines.append(
-                    f"  Prior bail history: {'Co-accused parity argument on record — HC previously granted bail to similarly placed accused' if parity else 'No co-accused parity argument on record'}"
+                    f"  Prior bail history: "
+                    f"{'Co-accused parity argument on record' if parity else 'No co-accused parity argument on record'}"
                 )
-            first_time = prior in ("None", "nil", "no prior", "No prior criminal record on file", None, "")
-            lines.append(f"  → Classification: {'FIRST-TIME OFFENDER ✓' if first_time else 'HAS PRIOR RECORD — review above'}")
+
+            classification = (
+                "FIRST-TIME OFFENDER ✓" if is_clean
+                else "REPEAT OFFENDER — has prior record"
+                + (" | BAIL VIOLATION on record ⚠️" if bail_viol else "")
+            )
+            lines.append(f"  → Classification: {classification}")
             return "\n".join(lines)
 
         return f"Unknown action type: {type(action).__name__}"
