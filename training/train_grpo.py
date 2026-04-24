@@ -359,15 +359,12 @@ def combined_reward(
             b  = reward_no_bias([comp], [ep])[0]
             rq = 0.5  # Neutral when server functions unavailable
 
-        # R4 efficiency bonus: reward fewer steps when outcome is correct
+        # NOTE: Efficiency is NOT computed in GRPO training because step_count=1
+        # always (single-shot generation), making eff=1.0 a constant non-signal.
+        # Efficiency is preserved in the environment's compute_reward for live inference.
         eff = 0.0
-        if o >= 0.8:
-            steps_taken = kwargs.get("step_counts", [None] * len(completions))
-            sc = steps_taken[completions.index(comp)] if comp in completions else None
-            if sc is not None:
-                eff = max(0.0, 1.0 - (sc - 1) / 9)
 
-        total = 0.3*o + 0.2*fr + 0.2*s + 0.2*ca + 0.1*rq + 0.1*eff - 0.3*b
+        total = 0.3*o + 0.2*fr + 0.2*s + 0.2*ca + 0.1*rq - 0.3*b
         rewards.append(round(total, 4))  # No max(0.0) clamp — bias can go negative
     return rewards
 

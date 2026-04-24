@@ -37,6 +37,7 @@ from ..models import (
     ComputeStatutoryEligibilityAction, AssessSuretyAction, ClassifyBailTypeAction,
     ReadSubmissionsAction, AssessFlightRiskAction, CheckCaseFactorsAction,
     ApplyProportionalityAction,
+    PullCriminalHistoryAction,
     SubmitMemoAction,
 )
 from .precedent_db import PrecedentDB
@@ -97,7 +98,8 @@ class UndertriAIEnvironment(Environment):
         self._flags         = []
         self._retrieved_precedents  = []
         self._action_history: List[str] = []
-        self._statutory_tool_called: bool = False  # M2: process reward tracking
+        self._statutory_tool_called: bool = False  # process reward tracking
+        self._tools_called: set = set()  # 5B.2: track unique tool types for repeat detection
         return self._make_observation(action_result=None)
 
     def step(
@@ -114,8 +116,26 @@ class UndertriAIEnvironment(Environment):
 
         # ---- Terminal action: submit memo ----
         if isinstance(action, SubmitMemoAction):
-            # Penalty for skipping all tool calls
-            # Increased to 0.40 so instant-submit can never be profitable by chance
+            # 4.5 Hard minimum: agent must have called at least 1 distinct tool before submitting.
+            # This is a structural gate — even a skip-penalty can't compensate for zero information.
+            if len(self._tools_called) == 0:
+                obs = self._make_observation(
+                    action_result=(
+                        "[BLOCKED] You must call at least one legal tool before submitting a memo. "
+                        "Use tools such as compute_statutory_eligibility, assess_flight_risk, "
+                        "read_submissions, or check_case_factors first."
+                    ),
+                    memo_submitted=False,
+                )
+                return StepResult(
+                    observation=obs,
+                    reward=-0.15,  # Stronger signal than just a penalty post-submission
+                    done=False,
+                    info={"blocked": "minimum_tools_not_met", "tools_called": 0},
+                )
+
+            # Skip penalty only if submitted on step 1 despite having called a tool
+            # (edge case where first action is somehow both a tool and submit)
             no_tool_penalty = 0.40 if self._step_count == 1 else 0.0
 
             reward_dict = compute_reward(
@@ -147,9 +167,26 @@ class UndertriAIEnvironment(Environment):
                 info=reward_dict,
             )
 
+        # ---- Repeat-action deduplication (5B.2) ----
+        tool_key = type(action).__name__
+        if tool_key in self._tools_called:
+            # Return cached note — no re-execution, no reward gaming
+            obs = self._make_observation(
+                action_result=(
+                    f"[CACHED] {tool_key} was already called this episode. "
+                    "The result is already in your action history above. "
+                    "Use a different tool or submit your memo."
+                ),
+                memo_submitted=False,
+            )
+            return StepResult(observation=obs, reward=-0.05, done=False,
+                              info={"cached": True, "tool": tool_key})
+
+        self._tools_called.add(tool_key)
+
         # ---- Tool actions with optional timeout enforcement ----
         if isinstance(action, ComputeStatutoryEligibilityAction):
-            self._statutory_tool_called = True  # M2: track for process reward
+            self._statutory_tool_called = True  # track for process reward
 
         if timeout_s is not None:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -340,6 +377,26 @@ class UndertriAIEnvironment(Environment):
                 lines.append(f"  Estimated trial completion: {remaining:.0f} more months")
                 if remaining > (max_months - action.custody_months):
                     lines.append("  ⚠️  Projected total custody exceeds maximum sentence — strong proportionality argument for bail")
+            return "\n".join(lines)
+
+        elif isinstance(action, PullCriminalHistoryAction):
+            ep      = self._episode
+            profile = ep.get("accused_profile", {})
+            prior   = profile.get("prior_cases", "No prior criminal record on file")
+            bail_type = profile.get("bail_type", "Unknown")
+            lines = [
+                "Criminal History Report:",
+                f"  Prior cases: {prior}",
+                f"  Bail type context: {bail_type}",
+            ]
+            if action.include_bail_history:
+                # Infer from parity flag and stage whether HC has dealt with bail before
+                parity = ep.get("ground_truth", {}).get("parity_argument_used", False)
+                lines.append(
+                    f"  Prior bail history: {'Co-accused parity argument on record — HC previously granted bail to similarly placed accused' if parity else 'No co-accused parity argument on record'}"
+                )
+            first_time = prior in ("None", "nil", "no prior", "No prior criminal record on file", None, "")
+            lines.append(f"  → Classification: {'FIRST-TIME OFFENDER ✓' if first_time else 'HAS PRIOR RECORD — review above'}")
             return "\n".join(lines)
 
         return f"Unknown action type: {type(action).__name__}"

@@ -101,7 +101,7 @@ def step(payload: dict):
         AssessSuretyAction, ClassifyBailTypeAction,
         ReadSubmissionsAction, AssessFlightRiskAction,
         CheckCaseFactorsAction, ApplyProportionalityAction,
-        SubmitMemoAction,
+        PullCriminalHistoryAction, SubmitMemoAction,
     )
     ACTION_MAP = {
         "request_document":             RequestDocumentAction,
@@ -114,6 +114,7 @@ def step(payload: dict):
         "assess_flight_risk":           AssessFlightRiskAction,
         "check_case_factors":           CheckCaseFactorsAction,
         "apply_proportionality":        ApplyProportionalityAction,
+        "pull_criminal_history":        PullCriminalHistoryAction,
         "submit_memo":                  SubmitMemoAction,
     }
     action_cls = ACTION_MAP.get(tool_name)

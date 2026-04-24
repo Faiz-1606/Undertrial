@@ -135,6 +135,13 @@ class ApplyProportionalityAction(Action):
     )
 
 
+class PullCriminalHistoryAction(Action):
+    """Pull the accused's prior criminal record, bail history, and conviction status."""
+    tool_name: Literal["pull_criminal_history"] = "pull_criminal_history"
+    include_bail_history: bool = Field(
+        default=True, description="Whether to include prior bail applications and outcomes"
+    )
+
 class SubmitMemoAction(Action):
     """
     TERMINAL ACTION — Submit the structured bail assessment memo.

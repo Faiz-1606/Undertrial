@@ -1,6 +1,5 @@
-"""UndertriAI server package."""
-try:
-    from ..models import *
-    from ..client import UndertriAIEnv
-except ImportError:
-    pass  # Standalone import (e.g., from train_grpo.py) — skip re-exports
+"""UndertriAI server package.
+
+Server-side code only. Do not import from client.py here —
+user-facing exports live in the root undertrial_ai/__init__.py.
+"""
