@@ -58,8 +58,11 @@ UndertriAI is an **OpenEnv-compliant RL training environment** that teaches an L
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/reset?stage=1` | Start a new episode (curriculum stage 1–4) |
+| `POST` | `/reset?adaptive=true&auto_stage=true` | Start episode with adaptive selection (Theme 4) |
 | `POST` | `/step` | Submit a tool call or final memo |
 | `GET` | `/state?session_id=...` | Inspect current episode state |
+| `GET` | `/profile?session_id=...` | Agent performance profile (Theme 4) |
+| `GET` | `/adaptive_status` | Adaptive mode capabilities & thresholds |
 | `GET` | `/health` | Health check |
 | `GET` | `/tools` | List available tools |
 | `WS` | `/ws/{session_id}` | WebSocket real-time feed |
@@ -74,6 +77,11 @@ UndertriAI is an **OpenEnv-compliant RL training environment** that teaches an L
 | `classify_bail_type` | Determine regular / anticipatory / default bail |
 | `request_document` | Request additional case documents |
 | `flag_inconsistency` | Flag contradictions in the charge sheet |
+| `read_submissions` | Read prosecution/defence arguments on record |
+| `assess_flight_risk` | Systematic flight risk scoring matrix |
+| `check_case_factors` | Examine parity, evidence tampering, victim vulnerability |
+| `apply_proportionality` | BNSS 479 custody vs. max sentence proportionality |
+| `pull_criminal_history` | Prior record, bail history, conviction status |
 | `submit_memo` | **Terminal action** — submit final bail recommendation |
 
 ### 4-Stage Curriculum
@@ -87,13 +95,71 @@ UndertriAI is an **OpenEnv-compliant RL training environment** that teaches an L
 
 ---
 
+## Theme 4 — Self-Improvement
+
+UndertriAI qualifies for Theme 4 through three mechanisms:
+
+**1. Adaptive Curriculum Promotion**
+The environment tracks per-domain and per-stage performance using exponential
+moving averages. When the agent demonstrates consistent improvement
+(Stage 1 mean reward ≥ 0.65 over 20 episodes), it automatically promotes
+to the next curriculum stage. This is visible in training logs as:
+```
+[SELF-IMPROVEMENT] Step 100: Promoted to Stage 2. Stage 1 mean reward: 0.710 → Stage 2 begins.
+```
+
+**2. Weakness-Targeted Episode Selection**
+In adaptive mode, the episode selector identifies the crime type where the
+agent performs worst and serves proportionally more cases from that domain.
+As the agent improves on weak domains, the selection distribution shifts —
+the environment continuously finds and targets new weaknesses.
+
+| Selection | Weight | Mechanism |
+|---|---|---|
+| Weakest domain | 60% | EMA-tracked per-crime-type reward |
+| Failure replay | 30% | Re-serve cases with reward < 0.40 |
+| Exploration | 10% | Uniform random (prevent overfitting) |
+
+**3. Synthetic Case Generation**
+When the agent masters a domain (mean reward > 0.70), the environment
+generates harder synthetic variants using 5 perturbation types:
+
+| Perturbation | What it tests |
+|---|---|
+| Custody escalation | Custody 2 months below threshold — forces careful statutory computation |
+| Co-accused conflict | Opposite bail outcome for co-accused — tests parity reasoning |
+| Section ambiguity | IPC ↔ BNSS section swap — tests schema drift adaptability |
+| Evidence reversal | Key witness retracted — tests flight risk reassessment |
+| Surety complexity | Non-resident surety — tests condition appropriateness |
+
+**Live Demo — Self-Improvement in Action**
+```bash
+# Start the server
+python -m server.app
+
+# In another terminal — start adaptive training
+python training/train_grpo.py --adaptive --steps 50 --env_url http://localhost:8000
+```
+
+Monitor progress via:
+```
+GET /profile?session_id={id}
+GET /adaptive_status
+```
+
+Watch stage promotions in the training log.
+
+---
+
 ## Reward Function
 
 ```
-R = 0.4 × outcome_match
+R = 0.4 × outcome_match (gated by reasoning quality)
   + 0.2 × flight_risk_accuracy
   + 0.2 × statutory_accuracy
   + 0.2 × condition_appropriateness
+  + 0.1 × reasoning_quality (bonus)
+  + 0.05 × format_compliance (bonus)
   − 0.3 × bias_penalty
 ```
 
@@ -101,16 +167,20 @@ All components are **fully deterministic and rule-based** — no LLM-as-judge.
 
 | Component | Signal | Details |
 |---|---|---|
-| **Outcome Match** | 0.0 / 0.8 / 1.0 | Exact, directional, or wrong vs HC decision |
+| **Outcome Match** | 0.0 / 0.8 / 1.0 | Exact, directional, or wrong vs HC decision — gated by `<think>` block |
 | **Flight Risk** | 0–1 | Ordinal distance to ground-truth risk level |
-| **Statutory** | 0–1 | IPC/BNSS section, sentence threshold, custody duration |
+| **Statutory** | 0–1 | IPC/BNSS threshold computation, direction-gated, NDPS Section 37 aware |
 | **Conditions** | 0–1 | Appropriate bail conditions for crime/risk profile |
+| **Reasoning Quality** | 0–1 | Anchoring + arithmetic + grounds specificity (10% bonus) |
+| **Format Compliance** | 0–1 | XML tag adherence to system prompt (5% bonus) |
 | **Bias Penalty** | −0.3 | Fired if parity argument ignored in bias-flagged cases |
 
 ### Anti-Reward-Hacking Design
 
-- 5 independent reward signals (harder to simultaneously game all)
+- 7 independent reward signals (harder to simultaneously game all)
 - `GenerationInspectionCallback` prints raw completions every 25 training steps
+- Reasoning gate: no `<think>` block → outcome reward zeroed in Stage 2+
+- Direction gate: wrong bail direction → statutory bonus capped
 - Bias penalty operates as a separate signal, not folded into outcome
 - Schema drift (Stage 4) tests adaptability, not pattern memorisation
 
@@ -118,18 +188,110 @@ All components are **fully deterministic and rule-based** — no LLM-as-judge.
 
 ## Training
 
-Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-3B-Instruct`.
+Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-7B-Instruct`.
 
-```bash
-# Run with before/after eval and results.json
-python training/train_grpo.py \
-  --episodes_dir ./data/episodes \
-  --stage 1 \
-  --steps 200 \
-  --eval_after
+### Training Modes
+
+| Mode | Command | Description |
+|---|---|---|
+| Single stage | `python training/train_grpo.py --stage 1 --steps 200` | Train on one stage |
+| Curriculum | `python training/train_grpo.py --curriculum --steps 150` | Sequential 4-stage with trace harvesting |
+| **Adaptive** | `python training/train_grpo.py --adaptive --steps 50` | **Theme 4** — self-directed with auto-promotion |
+
+### Google Colab Training Walkthrough
+
+```python
+# ============================================================
+# STEP 1 — Install dependencies (run in first cell)
+# ============================================================
+!pip install -q "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+!pip install -q --no-deps trl peft accelerate bitsandbytes xformers
+!pip install -q openenv-core datasets
+
+# ============================================================
+# STEP 2 — Clone the repository
+# ============================================================
+!git clone https://github.com/Faiz-1606/Undertrial.git
+%cd Undertrial
+
+# ============================================================
+# STEP 3 — Verify episodes are available
+# ============================================================
+import os
+episodes_dir = "./data/episodes"
+if not os.path.exists(episodes_dir):
+    print("No episodes directory — will use built-in demo episodes")
+else:
+    for f in os.listdir(episodes_dir):
+        if f.endswith('.jsonl'):
+            count = sum(1 for _ in open(f"{episodes_dir}/{f}"))
+            print(f"  {f}: {count} episodes")
+
+# ============================================================
+# STEP 4 — Option A: Single-stage training (quick, ~20 min on T4)
+# ============================================================
+!python training/train_grpo.py \
+    --episodes_dir ./data/episodes \
+    --stage 1 \
+    --steps 200 \
+    --batch_size 4 \
+    --eval_after
+
+# ============================================================
+# STEP 4 — Option B: Curriculum training (full, ~90 min on T4)
+# ============================================================
+!python training/train_grpo.py \
+    --episodes_dir ./data/episodes \
+    --curriculum \
+    --steps 150 \
+    --batch_size 4
+
+# ============================================================
+# STEP 4 — Option C: Adaptive training (Theme 4, ~60 min on T4)
+# (Requires server running — start in a background cell first)
+# ============================================================
+# Background cell: start the server
+import subprocess
+server = subprocess.Popen(
+    ["python", "-m", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+)
+import time; time.sleep(5)  # Wait for server startup
+
+# Then run adaptive training
+!python training/train_grpo.py \
+    --adaptive \
+    --episodes_dir ./data/episodes \
+    --steps 50 \
+    --batch_size 4 \
+    --env_url http://localhost:8000
+
+# ============================================================
+# STEP 5 — View results
+# ============================================================
+import json
+# For single/curriculum:
+results = json.load(open("./output/undertrial_grpo/results.json"))
+print(json.dumps(results, indent=2))
+
+# For adaptive:
+# results = json.load(open("./output/undertrial_grpo/results_adaptive.json"))
+
+# ============================================================
+# STEP 6 — (Optional) Merge LoRA adapters for inference
+# ============================================================
+from unsloth import FastLanguageModel
+model, tokenizer = FastLanguageModel.from_pretrained(
+    "./output/undertrial_grpo/final",
+    max_seq_length=3072,
+)
+model.save_pretrained_merged(
+    "./output/undertrial_merged",
+    tokenizer,
+    save_method="merged_16bit",
+)
+print("Merged model saved to ./output/undertrial_merged")
 ```
-
-Or use the Colab notebook: [`training/UndertriAI_GRPO_Training.ipynb`](training/UndertriAI_GRPO_Training.ipynb)
 
 ### Training Architecture
 
@@ -146,7 +308,13 @@ Episode Dataset (JSONL)
         ↓
   GRPO updates model weights
         ↓
-  GenerationInspectionCallback logs samples every 25 steps
+  [Theme 4] PerformanceTracker updates EMA per domain/stage
+        ↓
+  [Theme 4] AdaptiveSelector targets weakest domain
+        ↓
+  [Theme 4] CaseGenerator creates harder synthetic variants
+        ↓
+  [Theme 4] Auto-promote when stage EMA exceeds threshold
 ```
 
 ---
@@ -178,21 +346,25 @@ env = from_hub("Draken1606/undertrial-ai")
 ```
 undertrial_ai/
 ├── server/
-│   ├── app.py                  # FastAPI routes
-│   ├── undertrial_environment.py  # Environment logic
-│   ├── reward.py               # 5-component deterministic reward
-│   ├── dataset.py              # Curriculum-staged episode loader
-│   └── schema_drift.py         # IPC → BNSS remapping (Stage 4)
+│   ├── app.py                    # FastAPI routes + Theme 4 endpoints
+│   ├── undertrial_environment.py # Environment logic
+│   ├── reward.py                 # 7-component deterministic reward
+│   ├── dataset.py                # Curriculum-staged episode loader
+│   ├── schema_drift.py           # IPC → BNSS remapping (Stage 4)
+│   ├── performance_tracker.py    # [Theme 4] EMA-based performance profiling
+│   ├── adaptive_selector.py      # [Theme 4] Weakness-targeted episode selection
+│   └── case_generator.py         # [Theme 4] Synthetic case perturbation
 ├── training/
-│   ├── train_grpo.py           # GRPO training script
+│   ├── train_grpo.py             # GRPO training (single/curriculum/adaptive)
 │   └── UndertriAI_GRPO_Training.ipynb  # Colab notebook
 ├── data/
-│   └── episodes/               # 1,200 HC judgments across 4 stages
+│   └── episodes/                 # 1,200 HC judgments across 4 stages
 ├── demo/
-│   └── index.html              # Interactive demo UI
-├── client.py                   # UndertriAIEnv HTTP client
-├── models.py                   # Pydantic action/observation schemas
-└── Dockerfile                  # HF Spaces deployment
+│   └── index.html                # Interactive demo UI
+├── client.py                     # UndertriAIEnv HTTP client
+├── models.py                     # Pydantic action/observation schemas
+├── openenv.yaml                  # OpenEnv manifest
+└── Dockerfile                    # HF Spaces deployment
 ```
 
 ---

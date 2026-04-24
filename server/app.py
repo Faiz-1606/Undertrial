@@ -5,16 +5,40 @@ Wraps UndertriAIEnvironment as an OpenEnv-compatible HTTP + WebSocket server.
 
 import os
 from pathlib import Path
+from dataclasses import dataclass, field
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 import json
 import uuid
-
+from typing import List, Optional
 
 from .undertrial_environment import UndertriAIEnvironment
+from .performance_tracker import PerformanceTracker
+from .adaptive_selector import AdaptiveSelector
+from .case_generator import generate_variants
 
-# Session store: episode_id → environment instance
+
+# ------------------------------------------------------------------
+# Session state
+# ------------------------------------------------------------------
+
+@dataclass
+class SessionState:
+    """Per-session state wrapping the environment + Theme 4 components."""
+    env: UndertriAIEnvironment
+    tracker: PerformanceTracker = field(default_factory=PerformanceTracker)
+    adaptive: bool = False
+    selector: Optional[AdaptiveSelector] = None
+    tools_used: List[str] = field(default_factory=list)
+    synthetic_cases_generated: int = 0
+
+    def __post_init__(self):
+        if self.selector is None:
+            self.selector = AdaptiveSelector(self.env.dataset, self.tracker)
+
+
+# Session store: session_id → SessionState
 _sessions: dict = {}
 
 app = FastAPI(
@@ -33,14 +57,16 @@ app.add_middleware(
 EPISODES_DIR = os.environ.get("UNDERTRIAL_EPISODES_DIR", None)
 
 
-def get_or_create_env(session_id: str) -> UndertriAIEnvironment:
+def get_or_create_session(session_id: str) -> SessionState:
+    """Get existing session or create new one with all Theme 4 components."""
     if session_id not in _sessions:
-        _sessions[session_id] = UndertriAIEnvironment(episodes_dir=EPISODES_DIR)
+        env = UndertriAIEnvironment(episodes_dir=EPISODES_DIR)
+        _sessions[session_id] = SessionState(env=env)
     return _sessions[session_id]
 
 
 # ------------------------------------------------------------------
-# REST endpoints
+# REST endpoints (existing — preserved exactly)
 # ------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
@@ -69,12 +95,46 @@ def health():
 
 
 @app.post("/reset")
-def reset(stage: int = 1, session_id: str = None, seed: int = None, episode_id: str = None):
+def reset(
+    stage: int = 1,
+    session_id: str = None,
+    seed: int = None,
+    episode_id: str = None,
+    adaptive: bool = False,
+    auto_stage: bool = False,
+):
     if session_id is None:
         session_id = str(uuid.uuid4())
-    env = get_or_create_env(session_id)
-    env.set_stage(stage)
-    obs = env.reset(stage=stage, seed=seed, episode_id=episode_id)
+
+    session = get_or_create_session(session_id)
+    env = session.env
+    session.adaptive = adaptive
+    session.tools_used = []  # Reset tools tracking
+
+    # Auto-stage: use tracker's suggestion
+    effective_stage = stage
+    if auto_stage:
+        effective_stage = session.tracker.suggest_next_stage()
+
+    env.set_stage(effective_stage)
+
+    # Adaptive episode selection
+    if adaptive and episode_id is None and seed is None:
+        # Use adaptive selector instead of uniform random
+        selected_ep = session.selector.select_episode(effective_stage)
+        # Inject the selected episode directly into the environment
+        env._episode = selected_ep
+        env._episode_id = str(uuid.uuid4())
+        env._step_count = 0
+        env._flags = []
+        env._retrieved_precedents = []
+        env._action_history = []
+        env._statutory_tool_called = False
+        env._tools_called = set()
+        obs = env._make_observation(action_result=None)
+    else:
+        obs = env.reset(stage=effective_stage, seed=seed, episode_id=episode_id)
+
     return {
         "session_id": session_id,
         "observation": obs.model_dump(),
@@ -91,7 +151,8 @@ def step(payload: dict):
     if not session_id or session_id not in _sessions:
         return JSONResponse(status_code=400, content={"error": "Invalid session_id. Call /reset first."})
 
-    env = _sessions[session_id]
+    session = _sessions[session_id]
+    env = session.env
 
     # Deserialize action by tool_name
     tool_name = action_data.get("tool_name", "")
@@ -126,7 +187,35 @@ def step(payload: dict):
     except Exception as e:
         return JSONResponse(status_code=422, content={"error": str(e)})
 
+    # Track tool usage for this session
+    if tool_name != "submit_memo":
+        session.tools_used.append(tool_name)
+
     result = env.step(action)
+
+    # Theme 4: Update tracker after terminal action (reward available)
+    if result.done and hasattr(result, "info") and isinstance(result.info, dict):
+        reward_components = result.info
+        episode = env._episode or {}
+        session.tracker.update(
+            episode=episode,
+            reward_components=reward_components,
+            tools_used=list(session.tools_used),
+        )
+
+        # Generate synthetic cases if agent mastered this domain
+        if session.adaptive:
+            crime_type = episode.get("crime_type", "")
+            if crime_type and session.tracker.should_generate_synthetic(crime_type):
+                variants = generate_variants(episode, n=3)
+                if variants:
+                    # Inject synthetic cases into the dataset
+                    stage = episode.get("curriculum_stage", 1)
+                    for v in variants:
+                        v["curriculum_stage"] = stage
+                        env.dataset._episodes.setdefault(stage, []).append(v)
+                    session.synthetic_cases_generated += len(variants)
+
     return {
         "session_id": session_id,
         "observation": result.observation.model_dump(),
@@ -140,7 +229,7 @@ def step(payload: dict):
 def state(session_id: str):
     if session_id not in _sessions:
         return JSONResponse(status_code=400, content={"error": "Invalid session_id."})
-    return _sessions[session_id].state
+    return _sessions[session_id].env.state
 
 
 @app.get("/observation")
@@ -148,7 +237,7 @@ def observation(session_id: str):
     """OpenEnv spec alias for /state — returns current episode observation."""
     if session_id not in _sessions:
         return JSONResponse(status_code=400, content={"error": "Invalid session_id."})
-    return _sessions[session_id].state
+    return _sessions[session_id].env.state
 
 
 @app.get("/tools")
@@ -172,13 +261,56 @@ def list_tools():
 
 
 # ------------------------------------------------------------------
+# Theme 4: New API endpoints (additive — do not replace existing)
+# ------------------------------------------------------------------
+
+@app.get("/profile")
+def get_profile(session_id: str):
+    """Returns the current PerformanceTracker profile for the session."""
+    if session_id not in _sessions:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Session '{session_id}' not found. Call /reset first."},
+        )
+    session = _sessions[session_id]
+    return {
+        "session_id": session_id,
+        "profile": session.tracker.get_profile(),
+        "adaptive_mode": session.adaptive,
+        "synthetic_cases_generated": session.synthetic_cases_generated,
+    }
+
+
+@app.get("/adaptive_status")
+def adaptive_status():
+    """Returns global adaptive mode capabilities (not session-specific)."""
+    return {
+        "adaptive_available": True,
+        "description": "Performance-aware episode selection and synthetic case generation",
+        "promotion_thresholds": {
+            "stage_1_to_2": {"min_reward": 0.65, "min_episodes": 20},
+            "stage_2_to_3": {"min_reward": 0.55, "min_episodes": 50},
+            "stage_3_to_4": {"min_reward": 0.50, "min_episodes": 20},
+        },
+        "perturbation_types": [
+            "custody_escalation",
+            "co_accused_conflict",
+            "section_ambiguity",
+            "evidence_reversal",
+            "surety_complexity",
+        ],
+    }
+
+
+# ------------------------------------------------------------------
 # WebSocket endpoint (OpenEnv standard)
 # ------------------------------------------------------------------
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
-    env = get_or_create_env(session_id)
+    session = get_or_create_session(session_id)
+    env = session.env
     try:
         while True:
             data = await websocket.receive_text()

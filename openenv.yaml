@@ -1,10 +1,12 @@
 name: undertrial-ai
-version: "1.0.0"
+version: "1.1.0"
 description: >
-  OpenEnv-compliant RL training environment for Indian bail decision support.
-  An LLM agent reads High Court bail cases, invokes legal tools, and submits
-  structured bail recommendations. Reward computed deterministically against
-  real HC judgments with an explicit bias penalty (lambda=0.3).
+  OpenEnv-compliant RL training environment for Indian bail decision support
+  with adaptive self-improvement (Theme 4). An LLM agent reads High Court bail
+  cases, invokes legal tools, and submits structured bail recommendations.
+  Reward computed deterministically against real HC judgments with an explicit
+  bias penalty (lambda=0.3). Features performance-aware episode selection,
+  stage-gated curriculum promotion, and synthetic case generation.
 
 author: Draken1606
 license: MIT
@@ -19,6 +21,8 @@ tags:
   - world-modeling
   - bias-mitigation
   - bnss-2023
+  - self-improvement
+  - adaptive-curriculum
 
 environment:
   class: undertrial_ai.server.undertrial_environment.UndertriAIEnvironment
@@ -52,17 +56,18 @@ actions:
     description: "TERMINAL — Submit structured bail assessment memo"
 
 reward:
-  formula: "0.3*outcome + 0.2*flight_risk + 0.2*statutory + 0.2*conditions + 0.1*reasoning_quality + 0.1*efficiency + 0.05*process_bonus - 0.3*bias"
+  formula: "0.4*outcome_gated + 0.2*flight_risk + 0.2*statutory + 0.2*conditions + 0.1*reasoning_quality + 0.05*format - 0.3*bias"
   range: [-0.7, 1.15]
   terminal_action: submit_memo
   deterministic: true
   llm_as_judge: false
   components:
-    - outcome_match: "Agreement with real High Court decision (30%)"
+    - outcome_match: "Agreement with real High Court decision, gated by reasoning quality (40%)"
     - flight_risk_accuracy: "Flight risk classification accuracy (20%)"
-    - statutory_accuracy: "IPC/BNSS threshold computation (20%)"
+    - statutory_accuracy: "IPC/BNSS threshold computation with direction gate (20%)"
     - condition_appropriateness: "Bail condition quality (20%)"
-    - reasoning_quality: "Justification anchoring + arithmetic verification + grounds specificity (10%)"
+    - reasoning_quality: "Justification anchoring + arithmetic verification + grounds specificity (10% bonus)"
+    - format_compliance: "XML tag adherence matching system prompt structure (5% bonus)"
     - bias_penalty: "Penalty for ignoring parity in bias cases (-30%)"
 
 curriculum:
@@ -72,12 +77,70 @@ curriculum:
   stage_3: "Bias reversal / parity cases"
   stage_4: "Schema drift (IPC→BNSS, regional FIR formats)"
 
+self_improvement:
+  adaptive_curriculum:
+    description: >
+      Performance-gated stage promotion using exponential moving averages.
+      Agent auto-promotes when per-stage EMA exceeds threshold.
+    thresholds:
+      stage_1_to_2: {min_reward: 0.65, min_episodes: 20}
+      stage_2_to_3: {min_reward: 0.55, min_episodes: 50}
+      stage_3_to_4: {min_reward: 0.50, min_episodes: 20}
+  weakness_targeting:
+    description: >
+      Adaptive episode selection identifies the crime type with lowest EMA
+      reward and serves proportionally more cases from that domain.
+    strategy: "60% weakest domain / 30% failure replay / 10% exploration"
+  synthetic_generation:
+    description: >
+      When agent masters a domain (EMA > 0.70), generates harder synthetic
+      variants using 5 perturbation types.
+    perturbation_types:
+      - custody_escalation
+      - co_accused_conflict
+      - section_ambiguity
+      - evidence_reversal
+      - surety_complexity
+
+endpoints:
+  - path: /reset
+    method: POST
+    description: "Start a new episode. Supports adaptive=true and auto_stage=true for Theme 4."
+  - path: /step
+    method: POST
+    description: "Submit a tool call or final memo. Updates performance tracker when done."
+  - path: /state
+    method: GET
+    description: "Inspect current episode state."
+  - path: /health
+    method: GET
+    description: "Health check."
+  - path: /tools
+    method: GET
+    description: "List available tools."
+  - path: /profile
+    method: GET
+    description: "Get agent performance profile for a session (Theme 4)."
+  - path: /adaptive_status
+    method: GET
+    description: "Get global adaptive mode capabilities and thresholds."
+  - path: /ws/{session_id}
+    method: WS
+    description: "WebSocket real-time feed."
+
 training:
   method: GRPO
   framework: TRL + Unsloth
   model: unsloth/Qwen2.5-7B-Instruct
   notebook: training/UndertriAI_GRPO_Training.ipynb
   script: training/train_grpo.py
+  modes:
+    - name: single_stage
+      command: "python training/train_grpo.py --stage 1 --steps 200"
+    - name: curriculum
+      command: "python training/train_grpo.py --curriculum --steps 150"
+    - name: adaptive
+      command: "python training/train_grpo.py --adaptive --steps 50 --env_url http://localhost:8000"
 
 deployment:
   platform: huggingface-spaces

@@ -12,6 +12,27 @@ from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
+# Shared helper: NDPS detection (canonical definition — import this elsewhere)
+# ---------------------------------------------------------------------------
+
+def _is_ndps_case(episode: dict) -> bool:
+    """
+    Detect narcotics cases even when special_laws field is empty.
+    Checks ipc_sections and crime_type for NDPS indicators.
+
+    This is the SINGLE canonical definition — import from server.reward
+    in undertrial_environment.py and training/train_grpo.py.
+    """
+    sections = " ".join(str(s) for s in episode.get("ipc_sections", [])).lower()
+    crime = str(episode.get("crime_type", "")).lower()
+    narcotics_indicators = [
+        "ndps", "narcotic", "drug", "psychotropic",
+        "20(b)", "22(b)", "27a", "section 37",
+    ]
+    return any(ind in sections or ind in crime for ind in narcotics_indicators)
+
+
+# ---------------------------------------------------------------------------
 # 1. Outcome Match  (40%)
 # ---------------------------------------------------------------------------
 
@@ -170,6 +191,23 @@ def compute_statutory_accuracy(
     if not special_laws and any(t in crime_type_lower for t in CRIME_TYPE_SPECIAL_LAWS):
         special_laws = "INFERRED"  # Treat as special-law-restricted for eligibility
 
+    # ── B9: NDPS-specific statutory scoring ──────────────────────────────
+    # NDPS Section 37 twin conditions override standard threshold logic.
+    # Reward the agent for recognizing NDPS applies, not for arithmetic.
+    if _is_ndps_case(episode):
+        gt_granted = "grant" in gt_outcome.lower()
+        direction_correct = (agent_eligible == gt_granted)
+        ndps_recognized = any(
+            t in comp for t in ["section 37", "twin condition", "ndps", "37(1)(b)"]
+        )
+        if ndps_recognized and direction_correct:
+            return 1.0
+        elif direction_correct:
+            return 0.5
+        else:
+            return 0.0
+
+    # ── Standard IPC/BNSS statutory scoring ──────────────────────────────
     # Compute ground-truth eligibility for cases with known custody duration
     half_sent_months = (max_sent * 12) / 2
     truly_eligible   = (custody_mo >= half_sent_months) and not special_laws
@@ -464,6 +502,72 @@ def compute_reasoning_quality(
 
 
 # ---------------------------------------------------------------------------
+# 7. Think-block reasoning gate (B6)
+# ---------------------------------------------------------------------------
+
+def compute_think_factor(completion: str, current_stage: int) -> float:
+    """
+    Gate outcome credit on reasoning quality.
+    Stage 1: soft floor of 0.3 minimum (model still learning format).
+    Stage 2+: hard gate — no reasoning = no outcome credit.
+    Threshold: 120 words for full credit.
+    """
+    if not completion:
+        return 0.3 if current_stage == 1 else 0.0
+
+    think_match = re.search(r'<think>(.*?)</think>', completion, re.DOTALL)
+    think_text = think_match.group(1).strip() if think_match else ""
+    think_len = len(think_text.split())
+    raw_factor = min(1.0, think_len / 120.0)
+
+    if current_stage == 1:
+        # Soft floor: minimum 0.3 credit even with no think block
+        # Ensures GRPO has non-zero gradient signal in early training
+        return 0.3 + 0.7 * raw_factor
+    else:
+        # Hard gate: must reason to earn outcome credit
+        return raw_factor
+
+
+# ---------------------------------------------------------------------------
+# 8. Format compliance (B8)
+# ---------------------------------------------------------------------------
+
+def reward_format(completion: str) -> float:
+    """
+    Score structural compliance of the bail memo.
+    Checks for required XML tags matching the system prompt and valid outcome.
+    Returns 0.0–1.0 (fraction of required elements present).
+    """
+    if not completion:
+        return 0.0
+
+    # Tags must match exactly what SYSTEM_PROMPT instructs the model to produce
+    required_tags = [
+        r'<think>',
+        r'<memo>',
+        r'<flight_risk>',
+        r'<statutory_eligible>',
+        r'<recommended_outcome>',
+        r'<statutory_computation>',
+    ]
+    valid_outcomes = [
+        'bail granted', 'bail denied',
+        'conditional bail', 'default bail',
+    ]
+
+    checks = [
+        bool(re.search(tag, completion, re.IGNORECASE))
+        for tag in required_tags
+    ]
+    checks.append(
+        any(outcome in completion.lower() for outcome in valid_outcomes)
+    )
+
+    return sum(checks) / len(checks)
+
+
+# ---------------------------------------------------------------------------
 # Master reward function
 # ---------------------------------------------------------------------------
 
@@ -480,22 +584,28 @@ def compute_reward(
     agent_flight_risk_justification: str = "",
     agent_grounds_for: Optional[List[str]] = None,
     agent_grounds_against: Optional[List[str]] = None,
+    completion_text: Optional[str] = None,
+    current_stage: int = 1,
 ) -> Dict[str, float]:
     """
     Computes the full reward for a submitted bail assessment memo.
 
-    Formula:
-        R = 0.3*outcome_match                (was 0.4 — reduced to reward reasoning)
+    Formula (B6/B8 update):
+        R = 0.4*outcome_gated                 (gated by think_factor)
           + 0.2*flight_risk_accuracy
           + 0.2*statutory_accuracy
           + 0.2*condition_appropriateness
-          + 0.1*reasoning_quality             (NEW — anchoring + arithmetic + specificity)
-          + 0.1*efficiency_bonus              (only when outcome is correct)
-          + 0.05*process_bonus
+          + 0.1*reasoning_quality
+          + 0.05*efficiency_bonus
+          + 0.05*format_score
+          + process_bonus
           - 0.3*bias_penalty
 
+    Core components: 0.4+0.2+0.2+0.2 = 1.0
+    Bonuses: rq(0.1) + eff(0.05) + fmt(0.05) + process(0.05)
+    Penalty: -0.3*bias
+
     Returns a dict with all component scores + total_reward.
-    Range: approx [-0.4, 1.1].
     """
     gt = episode["ground_truth"]
 
@@ -515,6 +625,18 @@ def compute_reward(
         episode                   = episode,
     )
 
+    # B6: Gate outcome credit on reasoning quality (think block)
+    # In server path, completion_text may be None (structured memo submission)
+    # — default to think_factor=1.0 (no gating; env already enforces min tools).
+    if completion_text:
+        think_factor = compute_think_factor(completion_text, current_stage)
+    else:
+        think_factor = 1.0
+    om_gated = om * think_factor
+
+    # B8: Format compliance score
+    fmt = reward_format(completion_text) if completion_text else 0.5
+
     # Efficiency bonus: reward finishing faster when the answer is correct.
     # Only fires on directionally-correct outcomes (om >= 0.8) to prevent
     # rewarding efficient-but-wrong agents.
@@ -526,15 +648,25 @@ def compute_reward(
     # Process reward: +0.05 if agent actually used the statutory tool.
     process_bonus = 0.05 if statutory_tool_used else 0.0
 
+    # Reward formula:
+    # Core (sum=1.0): 0.4*outcome_gated + 0.2*flight + 0.2*statutory + 0.2*conditions
+    # Bonuses:        0.1*reasoning_quality + 0.05*efficiency + 0.05*format
+    # Process:        +0.05 if statutory tool used
+    # Penalty:        -0.3*bias
     lam   = 0.3
-    total = 0.3*om + 0.2*fr + 0.2*sa + 0.2*ca + 0.1*rq + 0.1*efficiency + process_bonus - lam*bias
+    total = (0.4*om_gated + 0.2*fr + 0.2*sa + 0.2*ca
+             + 0.1*rq + 0.05*efficiency + 0.05*fmt
+             + process_bonus - lam*bias)
 
     return {
         "outcome_match":             round(om,           4),
+        "outcome_match_gated":       round(om_gated,     4),
+        "think_factor":              round(think_factor,  4),
         "flight_risk_accuracy":      round(fr,           4),
         "statutory_accuracy":        round(sa,           4),
         "condition_appropriateness": round(ca,           4),
         "reasoning_quality":         round(rq,           4),
+        "format_score":              round(fmt,          4),
         "efficiency_bonus":          round(efficiency,   4),
         "process_bonus":             round(process_bonus,4),
         "bias_penalty":              round(bias,         4),

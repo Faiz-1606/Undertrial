@@ -8,7 +8,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from .dataset import BailDataset
-from .reward import compute_reward
+from .reward import compute_reward, _is_ndps_case
 from .schema_drift import maybe_apply_drift
 
 try:
@@ -277,6 +277,21 @@ class UndertriAIEnvironment(Environment):
             return "No directly applicable precedents found in database."
 
         elif isinstance(action, ComputeStatutoryEligibilityAction):
+            # B9: NDPS cases get Section 37 response instead of threshold arithmetic
+            if _is_ndps_case(self._episode):
+                return (
+                    f"Statutory Eligibility Analysis:\n"
+                    f"  Sections: {', '.join(action.sections_invoked)}\n"
+                    f"  Special Law: NDPS Act applies\n"
+                    f"  Section: Section 37 NDPS Act\n"
+                    f"  Message: NDPS Section 37 applies. Standard custody threshold not applicable. "
+                    f"Bail requires twin conditions under Section 37(1)(b): "
+                    f"(i) reasonable grounds to believe accused is not guilty, "
+                    f"(ii) no reasonable opportunity to commit offence if released. "
+                    f"These are matters for judicial discretion, not statutory calculation.\n"
+                    f"  → ELIGIBLE FOR DEFAULT BAIL: NOT APPLICABLE (NDPS twin conditions govern)"
+                )
+
             half_months = (action.max_sentence_years * 12) / 2
             eligible = action.custody_months >= half_months and not action.special_law_applicable
             pct = round((action.custody_months / (action.max_sentence_years * 12)) * 100, 1) if action.max_sentence_years else 0

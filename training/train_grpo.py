@@ -52,12 +52,41 @@ try:
         compute_condition_score,
         compute_bias_penalty as _server_bias,
         compute_reasoning_quality,
+        compute_think_factor,
+        reward_format as server_reward_format,
+        _is_ndps_case,
     )
     _USE_SERVER_REWARDS = True
     print("[reward] Using authoritative server/reward.py functions.")
 except ImportError:
     _USE_SERVER_REWARDS = False
     print("[reward] server/reward.py not found — using local fallback functions.")
+
+    # Local fallback definition of _is_ndps_case (mirrors server/reward.py)
+    def _is_ndps_case(episode: dict) -> bool:
+        sections = " ".join(str(s) for s in episode.get("ipc_sections", [])).lower()
+        crime = str(episode.get("crime_type", "")).lower()
+        narcotics_indicators = [
+            "ndps", "narcotic", "drug", "psychotropic",
+            "20(b)", "22(b)", "27a", "section 37",
+        ]
+        return any(ind in sections or ind in crime for ind in narcotics_indicators)
+
+    # Local fallback definition of compute_think_factor (mirrors server/reward.py)
+    def compute_think_factor(completion: str, current_stage: int) -> float:
+        if not completion:
+            return 0.3 if current_stage == 1 else 0.0
+        think_match = re.search(r'<think>(.*?)</think>', completion, re.DOTALL)
+        think_text = think_match.group(1).strip() if think_match else ""
+        think_len = len(think_text.split())
+        raw_factor = min(1.0, think_len / 120.0)
+        if current_stage == 1:
+            return 0.3 + 0.7 * raw_factor
+        else:
+            return raw_factor
+
+    # Local fallback server_reward_format
+    server_reward_format = None  # Will use local reward_format below
 from datasets import Dataset
 
 # ============================================================
@@ -188,16 +217,39 @@ def parse_model_output(output: str) -> Dict[str, Any]:
 
 
 def reward_format(completions: List[str], **kwargs) -> List[float]:
-    """Reward well-formed XML output structure."""
-    scores = []
-    for c in completions:
-        score = 0.0
-        if "<think>" in c and "</think>" in c: score += 0.15
-        if "<memo>" in c and "</memo>" in c:   score += 0.15
-        for tag in ["flight_risk","statutory_eligible","recommended_outcome","statutory_computation"]:
-            if f"<{tag}>" in c: score += 0.05
-        scores.append(min(1.0, score))
-    return scores
+    """Reward well-formed XML output structure (batch API for GRPO compatibility)."""
+    return [reward_format_single(c) for c in completions]
+
+
+def reward_format_single(completion: str) -> float:
+    """
+    Score structural compliance of the bail memo.
+    Checks for required XML tags matching the system prompt and valid outcome.
+    Returns 0.0–1.0 (fraction of required elements present).
+    """
+    if not completion:
+        return 0.0
+    # Tags match exactly what SYSTEM_PROMPT instructs the model to produce
+    required_tags = [
+        r'<think>',
+        r'<memo>',
+        r'<flight_risk>',
+        r'<statutory_eligible>',
+        r'<recommended_outcome>',
+        r'<statutory_computation>',
+    ]
+    valid_outcomes = [
+        'bail granted', 'bail denied',
+        'conditional bail', 'default bail',
+    ]
+    checks = [
+        bool(re.search(tag, completion, re.IGNORECASE))
+        for tag in required_tags
+    ]
+    checks.append(
+        any(outcome in completion.lower() for outcome in valid_outcomes)
+    )
+    return sum(checks) / len(checks)
 
 
 def reward_outcome_match(completions: List[str], episode_batch: List[Dict], **kwargs) -> List[float]:
@@ -234,7 +286,12 @@ def reward_flight_risk(completions: List[str], episode_batch: List[Dict], **kwar
 
 
 def reward_statutory(completions: List[str], episode_batch: List[Dict], **kwargs) -> List[float]:
-    """20% weight: correct statutory eligibility computation."""
+    """20% weight: correct statutory eligibility computation.
+
+    B3: Direction-gated computation bonus — wrong direction gets 0.10 not 0.30.
+    B9: NDPS cases use crime_type detection and reward Section 37 recognition.
+    """
+    TIME_WORDS = ["month", "year", "sentence", "custody", "half", "served", "threshold"]
     scores = []
     for comp, ep in zip(completions, episode_batch):
         parsed    = parse_model_output(comp)
@@ -242,19 +299,61 @@ def reward_statutory(completions: List[str], episode_batch: List[Dict], **kwargs
         sections  = ep.get("ipc_sections", [])
         max_sent  = ep.get("max_sentence_years", 5.0)
         custody   = ep.get("custody_months", 0.0)
+        special_laws = ep.get("special_laws", "").strip()
+        gt_outcome = ep.get("ground_truth", {}).get("outcome", "")
+        agent_eligible = parsed["statutory_eligible"]
+
+        # B9: NDPS-specific scoring
+        if _is_ndps_case(ep):
+            gt_granted = "grant" in gt_outcome.lower()
+            direction_correct = (agent_eligible == gt_granted)
+            ndps_recognized = any(
+                t in comp_text for t in ["section 37", "twin condition", "ndps", "37(1)(b)"]
+            )
+            if ndps_recognized and direction_correct:
+                scores.append(1.0)
+            elif direction_correct:
+                scores.append(0.5)
+            else:
+                scores.append(0.0)
+            continue
+
+        # Infer special law from crime_type
+        CRIME_TYPE_SPECIAL_LAWS = [
+            "narcotics", "ndps", "pocso", "uapa", "pmla",
+            "terrorism", "organised crime", "money laundering",
+        ]
+        crime_type_lower = ep.get("crime_type", "").lower()
+        if not special_laws and any(t in crime_type_lower for t in CRIME_TYPE_SPECIAL_LAWS):
+            special_laws = "INFERRED"
+
+        # Standard IPC/BNSS threshold computation
+        half_sent_months = (max_sent * 12) / 2
+        truly_eligible = (custody >= half_sent_months) and not special_laws
 
         score = 0.0
-        # Mentions relevant sections
-        for sec in sections:
-            if sec.strip().lower() in comp_text or sec.strip() in comp:
-                score += 0.2
-        score = min(0.4, score)
 
-        # Mentions numbers
-        if re.search(r'\d+', comp_text): score += 0.3
-        # Mentions time-related words
-        if any(w in comp_text for w in ["month","year","sentence","custody","half","served","threshold"]):
-            score += 0.3
+        # 40%: eligibility direction
+        direction_correct = (agent_eligible == truly_eligible)
+        if direction_correct:
+            score += 0.4
+        elif (agent_eligible and "grant" in gt_outcome.lower()) or \
+             (not agent_eligible and "deni" in gt_outcome.lower()):
+            score += 0.2
+
+        # 30%: cited relevant sections
+        if sections:
+            hits = sum(1 for sec in sections if sec.strip().lower() in comp_text or sec.strip() in comp)
+            score += 0.3 * min(1.0, hits / len(sections))
+
+        # 30%: numeric computation (B3: direction-gated)
+        has_numbers = bool(re.search(r'\d+', comp_text))
+        has_time_ref = any(w in comp_text for w in TIME_WORDS)
+        if has_numbers and has_time_ref:
+            score += 0.3 if direction_correct else 0.10
+        elif has_numbers or has_time_ref:
+            score += 0.15 if direction_correct else 0.05
+
         scores.append(min(1.0, score))
     return scores
 
@@ -309,14 +408,24 @@ def reward_no_bias(completions: List[str], episode_batch: List[Dict], **kwargs) 
 def combined_reward(
     completions: List[str],
     episode_batch: List[Dict],
+    current_stage: int = 1,
     **kwargs
 ) -> List[float]:
     """
     Master reward combining all components.
-    R = 0.4*outcome + 0.2*flight_risk + 0.2*statutory + 0.2*condition - 0.3*bias
+
+    Formula (B6/B8 update):
+        R = 0.4*outcome_gated + 0.2*flight_risk + 0.2*statutory + 0.2*condition
+          + 0.1*reasoning_quality + 0.05*format
+          - 0.3*bias
+
+    Core (sum=1.0): 0.4*om_gated + 0.2*fr + 0.2*s + 0.2*ca
+    Bonuses:        0.1*rq + 0.05*fmt
+    Penalty:        -0.3*bias
 
     Uses server/reward.py functions when available (Fix 1).
-    Condition appropriateness replaces format score (Fix 2).
+    B6: Outcome gated by think_factor (stage-aware).
+    B8: Format compliance score included with 0.05 weight.
     """
     rewards = []
 
@@ -359,12 +468,22 @@ def combined_reward(
             b  = reward_no_bias([comp], [ep])[0]
             rq = 0.5  # Neutral when server functions unavailable
 
-        # NOTE: Efficiency is NOT computed in GRPO training because step_count=1
-        # always (single-shot generation), making eff=1.0 a constant non-signal.
-        # Efficiency is preserved in the environment's compute_reward for live inference.
-        eff = 0.0
+        # B6: Gate outcome credit on reasoning quality (think block)
+        think_factor = compute_think_factor(comp, current_stage)
+        om_gated = o * think_factor
 
-        total = 0.3*o + 0.2*fr + 0.2*s + 0.2*ca + 0.1*rq - 0.3*b
+        # B8: Format compliance score
+        if _USE_SERVER_REWARDS and server_reward_format is not None:
+            fmt = server_reward_format(comp)
+        else:
+            fmt = reward_format_single(comp)
+
+        # Reward formula:
+        # Core (sum=1.0): 0.4*outcome_gated + 0.2*flight + 0.2*statutory + 0.2*conditions
+        # Bonuses:        0.1*reasoning_quality + 0.05*format
+        # Penalty:        -0.3*bias
+        total = (0.4*om_gated + 0.2*fr + 0.2*s + 0.2*ca
+                 + 0.1*rq + 0.05*fmt - 0.3*b)
         rewards.append(round(total, 4))  # No max(0.0) clamp — bias can go negative
     return rewards
 
@@ -593,7 +712,7 @@ def train(
     # Reward wrapper that unpacks the stored JSON episode
     def reward_fn(completions: List[str], episode: List[str], **kwargs) -> List[float]:
         ep_objs = [json.loads(e) for e in episode]
-        return combined_reward(completions, ep_objs)
+        return combined_reward(completions, ep_objs, current_stage=stage)
 
     # ── GRPO Config ──────────────────────────────────────────
     from trl import GRPOConfig, GRPOTrainer  # type: ignore
@@ -711,7 +830,7 @@ def evaluate_baseline(episodes_dir: str, n_samples: int = 20):
             out = model.generate(inputs, max_new_tokens=512, temperature=0.7, do_sample=True)
 
         completion = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
-        r = combined_reward([completion], [ep])[0]
+        r = combined_reward([completion], [ep], current_stage=1)[0]
         rewards.append(r)
         print(f"  Case {ep['case_id']}: reward={r:.3f} | GT={ep['ground_truth']['outcome']}")
 
@@ -770,7 +889,7 @@ def evaluate_on_stage(
             out = model.generate(inputs, max_new_tokens=512, temperature=0.7, do_sample=True)
 
         completion = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
-        r = combined_reward([completion], [ep])[0]
+        r = combined_reward([completion], [ep], current_stage=stage)[0]
         rewards.append(r)
         results.append({"episode": ep, "completion": completion, "reward": r})
 
@@ -916,10 +1035,7 @@ def train_curriculum(
 
         def reward_fn(completions: List[str], episode: List[str], **kwargs) -> List[float]:
             ep_objs = [json.loads(e) for e in episode]
-            # Pass step_count=1 for curriculum training (single-shot XML, no multi-step env loop)
-            # This keeps efficiency contribution honest rather than silently 0.0
-            step_counts = [1] * len(completions)
-            return combined_reward(completions, ep_objs, step_counts=step_counts)
+            return combined_reward(completions, ep_objs, current_stage=stage)
 
         stage_output = f"{output_dir}/stage_{stage}"
         config = GRPOConfig(
@@ -1019,7 +1135,248 @@ def train_curriculum(
 
 
 # ============================================================
-# CELL 9 — Entry point
+# CELL 9 — Adaptive Training (Theme 4: Self-Improvement)
+# ============================================================
+
+def train_adaptive(
+    episodes_dir: str = "./data/episodes",
+    output_dir: str = "./output/undertrial_adaptive",
+    steps_per_assessment: int = 50,
+    max_total_steps: int = 2000,
+    batch_size: int = 4,
+    grad_accum: int = 4,
+    lr: float = 5e-6,
+    base_url: str = "http://localhost:8000",
+):
+    """
+    Self-directed curriculum training (Theme 4).
+
+    Uses the /profile endpoint to check stage readiness every
+    steps_per_assessment steps and promotes automatically.
+
+    This function communicates with the server via HTTP — it does NOT
+    import server internals. OpenEnv client/server separation is preserved.
+
+    Training loop:
+      1. Start at stage 1
+      2. Train for steps_per_assessment steps
+      3. Query /profile for suggested_stage
+      4. If suggested_stage > current_stage, promote
+      5. Repeat until max_total_steps or stage 4 mastered
+    """
+    print("=" * 60)
+    print("  UndertriAI — Adaptive Self-Improvement Training")
+    print(f"  Assessment every {steps_per_assessment} steps | Max {max_total_steps} steps")
+    print(f"  Server: {base_url}")
+    print("=" * 60)
+
+    from unsloth import FastLanguageModel  # type: ignore
+    from trl import GRPOConfig, GRPOTrainer  # type: ignore
+
+    # Load model once
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name="unsloth/Qwen2.5-7B-Instruct",
+        max_seq_length=3072,
+        load_in_4bit=True,
+        fast_inference=False,
+    )
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=16,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=16, lora_dropout=0, bias="none",
+        use_gradient_checkpointing="unsloth", random_state=42,
+    )
+
+    # HTTP helper for server communication
+    def query_profile(session_id: str) -> Optional[Dict]:
+        """Query the performance profile from the server via HTTP."""
+        try:
+            url = f"{base_url}/profile?session_id={urllib.parse.quote(session_id)}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                return json.loads(resp.read())
+        except Exception as e:
+            print(f"  [adaptive] Could not reach server profile: {e}")
+            return None
+
+    def notify_reset(session_id: str, stage: int) -> Optional[str]:
+        """Call /reset with adaptive=true on the server."""
+        try:
+            url = f"{base_url}/reset?session_id={urllib.parse.quote(session_id)}&stage={stage}&adaptive=true"
+            req = urllib.request.Request(url, method="POST")
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                data = json.loads(resp.read())
+                return data.get("session_id", session_id)
+        except Exception:
+            return None
+
+    current_stage = 1
+    total_steps = 0
+    session_id = f"adaptive_{uuid.uuid4().hex[:8]}" if 'uuid' in dir() else "adaptive_training"
+
+    # Try to initialise session on server
+    import uuid as _uuid_mod
+    session_id = f"adaptive_{_uuid_mod.uuid4().hex[:8]}"
+    notify_reset(session_id, current_stage)
+
+    # Tracking
+    stage_promotion_steps = []
+    reward_curve = []
+    stage_rewards = {1: [], 2: [], 3: [], 4: []}
+
+    while total_steps < max_total_steps:
+        print(f"\n{'━' * 60}")
+        print(f"  ADAPTIVE BLOCK: Steps {total_steps}–{total_steps + steps_per_assessment}")
+        print(f"  Current Stage: {current_stage} — {STAGE_NAMES.get(current_stage, '?')}")
+        print(f"{'━' * 60}")
+
+        # Load episodes for current stage
+        try:
+            episodes = load_episodes(episodes_dir, stage=current_stage, split="train")
+        except FileNotFoundError:
+            print(f"  No episodes for stage {current_stage} — breaking")
+            break
+
+        if not episodes:
+            print(f"  Empty episode list for stage {current_stage} — breaking")
+            break
+
+        # Build dataset
+        dataset = build_hf_dataset(episodes, tokenizer)
+        stage_for_closure = current_stage  # Capture for closure
+
+        def reward_fn(completions: List[str], episode: List[str], **kwargs) -> List[float]:
+            ep_objs = [json.loads(e) for e in episode]
+            return combined_reward(completions, ep_objs, current_stage=stage_for_closure)
+
+        block_output = f"{output_dir}/block_{total_steps}"
+        config = GRPOConfig(
+            output_dir=block_output,
+            learning_rate=lr,
+            per_device_train_batch_size=batch_size,
+            gradient_accumulation_steps=grad_accum,
+            num_train_epochs=1,
+            max_steps=steps_per_assessment,
+            num_generations=6,
+            max_completion_length=1024,
+            temperature=0.7,
+            beta=0.01,
+            logging_steps=5,
+            save_steps=steps_per_assessment,
+            report_to="none",
+            remove_unused_columns=False,
+        )
+
+        FastLanguageModel.for_training(model)
+        trainer = GRPOTrainer(
+            model=model,
+            processing_class=tokenizer,
+            config=config,
+            train_dataset=dataset,
+            reward_funcs=[reward_fn],
+        )
+        trainer.train()
+        total_steps += steps_per_assessment
+
+        # Evaluate current performance
+        eval_reward, _ = evaluate_on_stage(
+            model, tokenizer, episodes_dir, stage=current_stage, n_samples=15
+        )
+        stage_rewards[current_stage].append(eval_reward)
+        reward_curve.append((total_steps, round(eval_reward, 4)))
+        print(f"  Stage {current_stage} eval reward: {eval_reward:.4f}")
+
+        # Query server for stage promotion suggestion
+        profile_data = query_profile(session_id)
+        suggested_stage = current_stage
+
+        if profile_data and "profile" in profile_data:
+            suggested_stage = profile_data["profile"].get(
+                "suggested_stage", current_stage
+            )
+        else:
+            # Fallback: use local heuristic
+            if eval_reward >= 0.65 and current_stage == 1:
+                suggested_stage = 2
+            elif eval_reward >= 0.55 and current_stage == 2:
+                suggested_stage = 3
+            elif eval_reward >= 0.50 and current_stage == 3:
+                suggested_stage = 4
+
+        if suggested_stage > current_stage:
+            old_stage = current_stage
+            old_reward = eval_reward
+            current_stage = suggested_stage
+            stage_promotion_steps.append(
+                (total_steps, old_stage, current_stage, round(old_reward, 4))
+            )
+            print(
+                f"[SELF-IMPROVEMENT] Step {total_steps}: "
+                f"Promoted to Stage {current_stage}. "
+                f"Stage {old_stage} mean reward: {old_reward:.3f} → "
+                f"Stage {current_stage} begins."
+            )
+            # Notify server of promotion
+            notify_reset(session_id, current_stage)
+
+        # Check completion
+        if current_stage == 4:
+            s4_rewards = stage_rewards.get(4, [])
+            if s4_rewards and s4_rewards[-1] >= 0.50:
+                print(
+                    f"\n[SELF-IMPROVEMENT] Stage 4 mastered at step {total_steps}! "
+                    f"Reward: {s4_rewards[-1]:.3f}"
+                )
+                break
+
+        # Save checkpoint
+        model.save_pretrained(block_output, save_adapters_only=True)
+        tokenizer.save_pretrained(block_output)
+
+    # ── Final summary ──
+    print(f"\n{'═' * 60}")
+    print("  ADAPTIVE TRAINING COMPLETE")
+    print(f"{'═' * 60}")
+    print(f"  Total steps: {total_steps}")
+    print(f"  Stage promotions: {len(stage_promotion_steps)}")
+    for step_n, from_s, to_s, reward in stage_promotion_steps:
+        print(f"    Step {step_n}: Stage {from_s} → {to_s} (reward {reward:.3f})")
+    print(f"  Final stage: {current_stage}")
+
+    # Compute final reward per stage
+    final_reward_per_stage = {}
+    for s, rewards_list in stage_rewards.items():
+        if rewards_list:
+            final_reward_per_stage[str(s)] = round(rewards_list[-1], 4)
+
+    # Save results
+    results = {
+        "stage_promotion_steps": [
+            {"step": s, "from_stage": f, "to_stage": t, "reward": r}
+            for s, f, t, r in stage_promotion_steps
+        ],
+        "final_reward_per_stage": final_reward_per_stage,
+        "total_steps_completed": total_steps,
+        "reward_curve": [{"step": s, "reward": r} for s, r in reward_curve],
+    }
+    results_path = Path(output_dir) / "results_adaptive.json"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    results_path.write_text(json.dumps(results, indent=2))
+    print(f"\n  Results saved: {results_path}")
+
+    # Save final model
+    final_dir = f"{output_dir}/final"
+    model.save_pretrained(final_dir, save_adapters_only=True)
+    tokenizer.save_pretrained(final_dir)
+    print(f"  Final model saved: {final_dir}")
+
+    return results
+
+
+# ============================================================
+# CELL 10 — Entry point
 # ============================================================
 
 if __name__ == "__main__":
@@ -1035,6 +1392,10 @@ if __name__ == "__main__":
                         help="Run evaluation after training to measure improvement")
     parser.add_argument("--curriculum",    action="store_true",
                         help="Run self-improving curriculum training (all 4 stages)")
+    parser.add_argument("--adaptive",      action="store_true",
+                        help="Run adaptive self-improvement training (Theme 4)")
+    parser.add_argument("--env_url",       default="http://localhost:8000",
+                        help="Server URL for adaptive training")
 
     args = parser.parse_args()
 
@@ -1046,6 +1407,15 @@ if __name__ == "__main__":
             output_dir=args.output,
             max_steps_per_stage=args.steps,
             batch_size=args.batch_size,
+        )
+    elif args.adaptive:
+        train_adaptive(
+            episodes_dir=args.episodes_dir,
+            output_dir=args.output,
+            steps_per_assessment=args.steps,
+            max_total_steps=2000,
+            batch_size=args.batch_size,
+            base_url=args.env_url,
         )
     else:
         train(
