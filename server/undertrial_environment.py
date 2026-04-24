@@ -127,7 +127,10 @@ class UndertriAIEnvironment(Environment):
                 episode           = self._episode,
                 step_count        = self._step_count,
                 max_steps         = self.MAX_STEPS,
-                statutory_tool_used = self._statutory_tool_called,  # M2
+                statutory_tool_used              = self._statutory_tool_called,
+                agent_flight_risk_justification  = action.flight_risk_justification,
+                agent_grounds_for                = action.grounds_for_bail,
+                agent_grounds_against            = action.grounds_against_bail,
             )
             # Apply skip penalty (can push total legitimately negative)
             reward_dict["total_reward"] = round(reward_dict["total_reward"] - no_tool_penalty, 4)

@@ -51,6 +51,7 @@ try:
         compute_statutory_accuracy,
         compute_condition_score,
         compute_bias_penalty as _server_bias,
+        compute_reasoning_quality,
     )
     _USE_SERVER_REWARDS = True
     print("[reward] Using authoritative server/reward.py functions.")
@@ -337,14 +338,26 @@ def combined_reward(
                 parsed.get("conditions", []),
                 gt,
             )
-            b  = _server_bias(parsed["recommended_outcome"], ep)
+            b  = _server_bias(
+                parsed["recommended_outcome"], ep,
+                agent_grounds=parsed.get("grounds_for", []) + parsed.get("grounds_against", []),
+            )
+            rq = compute_reasoning_quality(
+                flight_risk_justification = parsed.get("flight_risk_just", ""),
+                agent_risk_label          = parsed.get("flight_risk", ""),
+                statutory_computation     = parsed.get("statutory_computation", ""),
+                grounds_for               = parsed.get("grounds_for", []),
+                grounds_against           = parsed.get("grounds_against", []),
+                episode                   = ep,
+            )
         else:
             # Local fallback
             o  = reward_outcome_match([comp], [ep])[0]
             fr = reward_flight_risk([comp], [ep])[0]
             s  = reward_statutory([comp], [ep])[0]
-            ca = reward_conditions([comp], [ep])[0]  # condition score, not format
+            ca = reward_conditions([comp], [ep])[0]
             b  = reward_no_bias([comp], [ep])[0]
+            rq = 0.5  # Neutral when server functions unavailable
 
         # R4 efficiency bonus: reward fewer steps when outcome is correct
         eff = 0.0
@@ -354,7 +367,7 @@ def combined_reward(
             if sc is not None:
                 eff = max(0.0, 1.0 - (sc - 1) / 9)
 
-        total = 0.4*o + 0.2*fr + 0.2*s + 0.2*ca + 0.1*eff - 0.3*b
+        total = 0.3*o + 0.2*fr + 0.2*s + 0.2*ca + 0.1*rq + 0.1*eff - 0.3*b
         rewards.append(round(total, 4))  # No max(0.0) clamp — bias can go negative
     return rewards
 

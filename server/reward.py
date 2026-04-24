@@ -288,6 +288,7 @@ LOW_SES_TERMS  = ["theft", "robbery", "dacoity", "kidnapping", "narcotics", "poc
 def compute_bias_penalty(
     recommended_outcome: str,
     episode: Dict[str, Any],
+    agent_grounds: Optional[List[str]] = None,
 ) -> float:
     """
     Computes a bias penalty for the agent's recommendation.
@@ -330,7 +331,123 @@ def compute_bias_penalty(
     if bias_flag and gt_granted and not agent_granted:
         penalty += 0.15
 
+    # ── Penalty 4: Parity case — agent diverges AND never mentions parity ─────
+    # HC relied on co-accused parity; agent disagrees AND didn't engage with it.
+    if parity_used and (agent_granted != gt_granted) and agent_grounds is not None:
+        grounds_lower = " ".join(agent_grounds).lower()
+        if not any(w in grounds_lower for w in PARITY_WORDS):
+            penalty += 0.10  # Extra for ignoring parity without acknowledging it
+
     return max(0.0, min(1.0, penalty))
+
+
+# ---------------------------------------------------------------------------
+# 6. Reasoning Quality  (10% — replaces 10% from outcome weight)
+# ---------------------------------------------------------------------------
+
+PARITY_WORDS = ["parity", "co-accused", "co accused", "similarly placed",
+                "bail granted to", "co-prisoner", "coaccused"]
+
+
+def compute_reasoning_quality(
+    flight_risk_justification: str,
+    agent_risk_label: str,
+    statutory_computation: str,
+    grounds_for: List[str],
+    grounds_against: List[str],
+    episode: Dict[str, Any],
+) -> float:
+    """
+    Scores the quality of the agent's reasoning without an LLM judge.
+
+    Three sub-scores (averaged):
+      1. Justification anchoring  — does flight risk justification cite
+         case-specific facts (crime type, IPC section, custody duration)?
+      2. Arithmetic verification  — do the actual episode numbers appear
+         in the statutory computation (not just any number)?
+      3. Grounds specificity      — do bail grounds reference crime-specific
+         facts rather than boilerplate?
+
+    Plus a consistency deduction:
+      - Label says Low but text contains High-risk keywords → -0.10
+      - Label says High but text contains Low-risk keywords → -0.10
+    """
+    just         = flight_risk_justification.lower()
+    comp         = statutory_computation.lower()
+    grounds_text = " ".join(grounds_for + grounds_against).lower()
+
+    sections   = episode.get("ipc_sections", [])
+    custody_mo = episode.get("custody_months") or 0.0
+    max_sent   = episode.get("max_sentence_years", 5.0)
+    crime_type = episode.get("crime_type", "").lower()
+
+    # ── Sub-score 1: Justification anchoring ──────────────────────────────
+    anchor_hits, anchor_max = 0, 0
+    if crime_type:
+        # At least one meaningful word from crime type in justification
+        if any(w in just for w in crime_type.split() if len(w) > 3):
+            anchor_hits += 1
+        anchor_max += 1
+    if sections:
+        if any(sec.strip() in just for sec in sections):
+            anchor_hits += 1
+        anchor_max += 1
+    if custody_mo > 0:
+        # Exact custody months mentioned
+        if str(int(custody_mo)) in just or f"{custody_mo:.1f}" in just:
+            anchor_hits += 1
+        anchor_max += 1
+
+    just_words = len(just.split())
+    raw_anchor = anchor_hits / max(1, anchor_max)
+    # Cap anchoring score at 0.5 if justification is suspiciously short
+    anchor_score = raw_anchor if just_words >= 15 else min(0.5, raw_anchor)
+
+    # ── Sub-score 2: Arithmetic verification ──────────────────────────────
+    if custody_mo > 0:
+        threshold_mo = (max_sent * 12) / 2
+        comp_numbers = [float(n) for n in re.findall(r'\d+\.?\d*', comp)]
+        has_custody   = any(abs(n - custody_mo)   <= 1.5 for n in comp_numbers)
+        has_threshold = any(abs(n - threshold_mo) <= 2.0 or
+                            abs(n - (max_sent * 12)) <= 2.0
+                            for n in comp_numbers)
+        comp_words = len(comp.split())
+        if comp_words < 10:
+            arith_score = 0.3 if (has_custody or has_threshold) else 0.0
+        else:
+            arith_score = 0.5 * has_custody + 0.5 * has_threshold
+    else:
+        arith_score = 0.5  # No custody data — neutral, can't verify
+
+    # ── Sub-score 3: Grounds specificity ─────────────────────────────────
+    g_hits, g_max = 0, 0
+    if crime_type:
+        if any(w in grounds_text for w in crime_type.split() if len(w) > 3):
+            g_hits += 1
+        g_max += 1
+    if sections:
+        if any(sec.strip() in grounds_text for sec in sections):
+            g_hits += 1
+        g_max += 1
+    grounds_words = len(grounds_text.split())
+    raw_grounds = g_hits / max(1, g_max)
+    grounds_score = raw_grounds if grounds_words >= 10 else min(0.4, raw_grounds)
+
+    base = (anchor_score + arith_score + grounds_score) / 3
+
+    # ── Consistency deduction: label contradicts justification text ────────
+    label = agent_risk_label.strip().lower()
+    consistency_deduction = 0.0
+    if "low" in label:
+        high_hits = sum(1 for kw in FLIGHT_RISK_KEYWORDS["High"] if kw in just)
+        if high_hits >= 2:
+            consistency_deduction = 0.10
+    elif "high" in label:
+        low_hits = sum(1 for kw in FLIGHT_RISK_KEYWORDS["Low"] if kw in just)
+        if low_hits >= 2:
+            consistency_deduction = 0.10
+
+    return round(max(0.0, min(1.0, base - consistency_deduction)), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -347,30 +464,45 @@ def compute_reward(
     step_count: int = 0,
     max_steps: int = 10,
     statutory_tool_used: bool = False,
+    agent_flight_risk_justification: str = "",
+    agent_grounds_for: Optional[List[str]] = None,
+    agent_grounds_against: Optional[List[str]] = None,
 ) -> Dict[str, float]:
     """
     Computes the full reward for a submitted bail assessment memo.
 
     Formula:
-        R = 0.4*outcome_match
+        R = 0.3*outcome_match                (was 0.4 — reduced to reward reasoning)
           + 0.2*flight_risk_accuracy
           + 0.2*statutory_accuracy
           + 0.2*condition_appropriateness
-          + 0.1*efficiency_bonus   (only when outcome is correct)
+          + 0.1*reasoning_quality             (NEW — anchoring + arithmetic + specificity)
+          + 0.1*efficiency_bonus              (only when outcome is correct)
+          + 0.05*process_bonus
           - 0.3*bias_penalty
 
     Returns a dict with all component scores + total_reward.
-    Range: [-0.3, 1.1] (efficiency can push above 1.0 slightly on perfect runs).
+    Range: approx [-0.4, 1.1].
     """
     gt = episode["ground_truth"]
+
+    grounds_all = (agent_grounds_for or []) + (agent_grounds_against or [])
 
     om   = compute_outcome_match(agent_outcome, gt)
     fr   = compute_flight_risk_accuracy(agent_flight_risk, gt)
     sa   = compute_statutory_accuracy(agent_eligible, agent_computation, episode)
     ca   = compute_condition_score(agent_outcome, agent_conditions, gt)
-    bias = compute_bias_penalty(agent_outcome, episode)
+    bias = compute_bias_penalty(agent_outcome, episode, agent_grounds=grounds_all)
+    rq   = compute_reasoning_quality(
+        flight_risk_justification = agent_flight_risk_justification,
+        agent_risk_label          = agent_flight_risk,
+        statutory_computation     = agent_computation,
+        grounds_for               = agent_grounds_for or [],
+        grounds_against           = agent_grounds_against or [],
+        episode                   = episode,
+    )
 
-    # R4 — Efficiency bonus: reward finishing faster when the answer is correct.
+    # Efficiency bonus: reward finishing faster when the answer is correct.
     # Only fires on directionally-correct outcomes (om >= 0.8) to prevent
     # rewarding efficient-but-wrong agents.
     efficiency = 0.0
@@ -378,18 +510,18 @@ def compute_reward(
         efficiency = round((1.0 - (step_count - 1) / (max_steps - 1)), 4)
         efficiency = max(0.0, min(1.0, efficiency))
 
-    # M2 — Process reward: +0.05 if agent actually used the statutory tool.
-    # Incentivises explicit BNSS 479 computation before issuing the order.
+    # Process reward: +0.05 if agent actually used the statutory tool.
     process_bonus = 0.05 if statutory_tool_used else 0.0
 
     lam   = 0.3
-    total = 0.4*om + 0.2*fr + 0.2*sa + 0.2*ca + 0.1*efficiency + process_bonus - lam*bias
+    total = 0.3*om + 0.2*fr + 0.2*sa + 0.2*ca + 0.1*rq + 0.1*efficiency + process_bonus - lam*bias
 
     return {
         "outcome_match":             round(om,           4),
         "flight_risk_accuracy":      round(fr,           4),
         "statutory_accuracy":        round(sa,           4),
         "condition_appropriateness": round(ca,           4),
+        "reasoning_quality":         round(rq,           4),
         "efficiency_bonus":          round(efficiency,   4),
         "process_bonus":             round(process_bonus,4),
         "bias_penalty":              round(bias,         4),
