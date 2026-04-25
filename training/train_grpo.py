@@ -835,6 +835,12 @@ def train(
 
     def reward_fn(completions: List[str], episode: List[str] = None, **kwargs) -> List[float]:
         ep_raw = episode or kwargs.get("episode", [])
+        print(f"[DEBUG reward_fn] {len(completions)} completions, {len(ep_raw)} episodes, kwargs_keys={list(kwargs.keys())}")
+        if ep_raw:
+            try:
+                sample = json.loads(ep_raw[0]) if isinstance(ep_raw[0], str) else ep_raw[0]
+                print(f"[DEBUG reward_fn] episode[0] has keys: {list(sample.keys())[:5]}, GT={sample.get('ground_truth',{}).get('outcome','?')}")
+            except: pass
         ep_objs = [json.loads(e) if isinstance(e, str) else e for e in ep_raw]
         # Expand if TRL passed batch-sized episodes (not repeated for num_generations)
         if ep_objs and len(ep_objs) < len(completions):
