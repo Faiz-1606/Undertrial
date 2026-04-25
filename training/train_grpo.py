@@ -188,6 +188,9 @@ def parse_model_output(output: str) -> Dict[str, Any]:
     We do NOT fall back to parsing raw output text — that's an exploit vector
     where an agent could scatter keywords in free text to trigger regex hits.
     """
+    # Fix 1.6: Guard against None input (e.g. from failed generation)
+    if not output:
+        output = ""
     memo_block = extract_xml_field(output, "memo")
     if not memo_block:
         # Return empty/zero dict — no reward for malformed output
@@ -755,9 +758,16 @@ def train(
     dataset = build_hf_dataset(episodes, tokenizer)
 
     # Reward wrapper that unpacks the stored JSON episode
-    def reward_fn(completions: List[str], episode: List[str], **kwargs) -> List[float]:
-        ep_objs = [json.loads(e) for e in episode]
-        return combined_reward(completions, ep_objs, current_stage=stage)
+    # Fix 1.3: Expand episode list if TRL doesn't repeat columns for num_generations
+    _stage_for_closure = stage  # Fix 1.4: capture value, not loop variable
+    def reward_fn(completions: List[str], episode: List[str] = None, **kwargs) -> List[float]:
+        ep_raw = episode or kwargs.get("episode", [])
+        ep_objs = [json.loads(e) if isinstance(e, str) else e for e in ep_raw]
+        # Expand if TRL passed batch-sized episodes (not repeated for num_generations)
+        if ep_objs and len(ep_objs) < len(completions):
+            n_gen = len(completions) // len(ep_objs)
+            ep_objs = [ep for ep in ep_objs for _ in range(n_gen)]
+        return combined_reward(completions, ep_objs[:len(completions)], current_stage=_stage_for_closure)
 
     # ── GRPO Config ──────────────────────────────────────────
     from trl import GRPOConfig, GRPOTrainer  # type: ignore
@@ -801,7 +811,7 @@ def train(
 
     print("\nStarting GRPO training...")
     print(f"  Steps: {max_steps} | Batch: {batch_size} x {grad_accum} grad_accum")
-    print(f"  Generations per prompt: 6 | KL beta: 0.01")
+    print(f"  Generations per prompt: 4 | KL beta: 0.01")
     print(f"  Inspection callback: every 25 steps")
     print()
 
@@ -1068,8 +1078,8 @@ def train_curriculum(
     output_dir: str = "./output/undertrial_grpo",
     stages: List[int] = None,
     max_steps_per_stage: int = 150,
-    batch_size: int = 4,
-    grad_accum: int = 4,
+    batch_size: int = 1,   # M4: T4-safe (was 4 — OOMs with 3B + 4 rollouts)
+    grad_accum: int = 8,   # M4: compensate to keep effective batch ~8
     lr: float = 5e-6,
     threshold: float = STAGE_THRESHOLD,
 ):
@@ -1158,9 +1168,16 @@ def train_curriculum(
             })
         dataset = Dataset.from_list(rows)
 
-        def reward_fn(completions: List[str], episode: List[str], **kwargs) -> List[float]:
-            ep_objs = [json.loads(e) for e in episode]
-            return combined_reward(completions, ep_objs, current_stage=stage)
+        # Fix 1.4: capture stage value to avoid closure-over-loop-variable bug
+        _stage_for_closure = stage
+        # Fix 1.3: expand episode list if TRL doesn't repeat for num_generations
+        def reward_fn(completions: List[str], episode: List[str] = None, **kwargs) -> List[float]:
+            ep_raw = episode or kwargs.get("episode", [])
+            ep_objs = [json.loads(e) if isinstance(e, str) else e for e in ep_raw]
+            if ep_objs and len(ep_objs) < len(completions):
+                n_gen = len(completions) // len(ep_objs)
+                ep_objs = [ep for ep in ep_objs for _ in range(n_gen)]
+            return combined_reward(completions, ep_objs[:len(completions)], current_stage=_stage_for_closure)
 
         stage_output = f"{output_dir}/stage_{stage}"
         config = GRPOConfig(
@@ -1697,7 +1714,7 @@ if __name__ == "__main__":
     parser.add_argument("--output",       default="./output/undertrial_grpo")
     parser.add_argument("--stage",        type=int, default=1)
     parser.add_argument("--steps",        type=int, default=200)
-    parser.add_argument("--batch_size",   type=int, default=4)
+    parser.add_argument("--batch_size",   type=int, default=1)   # M4: T4-safe (was 4)
     parser.add_argument("--baseline_only", action="store_true",
                         help="Only run baseline evaluation, skip training")
     parser.add_argument("--eval_after",    action="store_true",

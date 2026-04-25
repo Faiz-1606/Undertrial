@@ -408,4 +408,4 @@ This isn't a tool to replace judges. It's a mirror that forces the system to con
 
 ## Team
 
-Built for the **OpenEnv Hackathon, April 2026** by **Faiz (Draken1606)**.
+Built for the **OpenEnv Hackathon, April 2026** 
