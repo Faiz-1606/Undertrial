@@ -165,7 +165,7 @@ def step(payload: dict):
         AssessSuretyAction, ClassifyBailTypeAction,
         ReadSubmissionsAction, AssessFlightRiskAction,
         CheckCaseFactorsAction, ApplyProportionalityAction,
-        PullCriminalHistoryAction, SubmitMemoAction,
+        PullCriminalHistoryAction, IssueOrderAction, SubmitMemoAction,
     )
     ACTION_MAP = {
         "request_document":             RequestDocumentAction,
@@ -179,6 +179,7 @@ def step(payload: dict):
         "check_case_factors":           CheckCaseFactorsAction,
         "apply_proportionality":        ApplyProportionalityAction,
         "pull_criminal_history":        PullCriminalHistoryAction,
+        "issue_order":                  IssueOrderAction,
         "submit_memo":                  SubmitMemoAction,
     }
     action_cls = ACTION_MAP.get(tool_name)
@@ -346,7 +347,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     AssessSuretyAction, ClassifyBailTypeAction,
                     ReadSubmissionsAction, AssessFlightRiskAction,
                     CheckCaseFactorsAction, ApplyProportionalityAction,
-                    PullCriminalHistoryAction, SubmitMemoAction,
+                    PullCriminalHistoryAction, IssueOrderAction, SubmitMemoAction,
                 )
                 ACTION_MAP = {
                     "request_document":              RequestDocumentAction,
@@ -360,6 +361,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     "check_case_factors":            CheckCaseFactorsAction,
                     "apply_proportionality":         ApplyProportionalityAction,
                     "pull_criminal_history":         PullCriminalHistoryAction,
+                    "issue_order":                   IssueOrderAction,
                     "submit_memo":                   SubmitMemoAction,
                 }
                 action_cls = ACTION_MAP.get(tool_name)

@@ -1,8 +1,10 @@
 """
 UndertriAI — Reward Engine
-Computes the 4-component weighted reward + bias penalty.
+Computes the multi-component weighted reward + bias penalty.
 
-R = 0.4*outcome_match + 0.2*flight_risk_acc + 0.2*statutory_acc + 0.2*condition_acc - 0.3*bias_score
+R = 0.4*outcome_gated + 0.2*flight_risk + 0.2*statutory + 0.2*conditions
+  + 0.1*reasoning_quality + 0.05*efficiency + 0.05*format
+  + 0.05*process_bonus - 0.3*bias
 
 All components are deterministic and rule-based — no LLM-as-a-judge.
 """

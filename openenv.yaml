@@ -56,7 +56,7 @@ actions:
     description: "TERMINAL — Submit structured bail assessment memo"
 
 reward:
-  formula: "0.4*outcome_gated + 0.2*flight_risk + 0.2*statutory + 0.2*conditions + 0.1*reasoning_quality + 0.05*format - 0.3*bias"
+  formula: "0.4*outcome_gated + 0.2*flight_risk + 0.2*statutory + 0.2*conditions + 0.1*reasoning_quality + 0.05*efficiency + 0.05*format + 0.05*process_bonus - 0.3*bias"
   range: [-0.7, 1.15]
   terminal_action: submit_memo
   deterministic: true

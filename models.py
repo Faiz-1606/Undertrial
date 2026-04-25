@@ -310,3 +310,33 @@ class RewardBreakdown(BaseModel):
     ground_truth_outcome: str
     agent_outcome: str
     explanation: str
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+__all__ = [
+    # Base types
+    "Action", "Observation", "State", "StepResult",
+    # Actions (12 tool types + 1 terminal alias)
+    "RequestDocumentAction",
+    "FlagInconsistencyAction",
+    "CrossReferencePrecedentAction",
+    "ComputeStatutoryEligibilityAction",
+    "AssessSuretyAction",
+    "ClassifyBailTypeAction",
+    "ReadSubmissionsAction",
+    "AssessFlightRiskAction",
+    "CheckCaseFactorsAction",
+    "ApplyProportionalityAction",
+    "PullCriminalHistoryAction",
+    "IssueOrderAction",
+    "SubmitMemoAction",
+    # Union type
+    "BailAction",
+    # Observation / state
+    "AccusedProfile",
+    "CaseObservation",
+    "RewardBreakdown",
+]

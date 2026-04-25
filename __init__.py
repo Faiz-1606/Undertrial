@@ -7,7 +7,7 @@ from .models import (
     AssessSuretyAction, ClassifyBailTypeAction,
     ReadSubmissionsAction, AssessFlightRiskAction,
     CheckCaseFactorsAction, ApplyProportionalityAction,
-    SubmitMemoAction,
+    PullCriminalHistoryAction, IssueOrderAction, SubmitMemoAction,
 )
 
 __version__ = "1.0.0"
@@ -19,5 +19,5 @@ __all__ = [
     "AssessSuretyAction", "ClassifyBailTypeAction",
     "ReadSubmissionsAction", "AssessFlightRiskAction",
     "CheckCaseFactorsAction", "ApplyProportionalityAction",
-    "SubmitMemoAction",
+    "PullCriminalHistoryAction", "IssueOrderAction", "SubmitMemoAction",
 ]

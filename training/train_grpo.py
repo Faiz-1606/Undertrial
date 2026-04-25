@@ -28,8 +28,16 @@ INSTALL_COMMANDS = """
 import os, sys, json, re, argparse, random, time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
 import urllib.request
 import urllib.parse
+
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    _WANDB_AVAILABLE = False
 
 import torch
 
@@ -38,6 +46,37 @@ ENV_API_URL = os.environ.get(
     "UNDERTRIAL_ENV_URL",
     "https://draken1606-undertrial-ai.hf.space",
 )
+
+
+def preflight_check(env_url: str) -> None:
+    """
+    Change 3: Verify the environment server is reachable before training.
+    Sends GET {env_url}/health and validates response.
+    """
+    import urllib.error
+    try:
+        req = urllib.request.Request(f"{env_url}/health")
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            data = json.loads(resp.read())
+        if data.get("status") not in ("ok", "healthy"):
+            raise RuntimeError(
+                f"Environment not reachable at {env_url}. Deploy your HF Space first."
+            )
+        print(f"[PREFLIGHT] Environment healthy at {env_url}")
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError(
+            f"Environment not reachable at {env_url}. Deploy your HF Space first. ({e})"
+        )
+
+    # Quick reset test
+    try:
+        reset_req = urllib.request.Request(f"{env_url}/reset?stage=1", method="POST")
+        with urllib.request.urlopen(reset_req, timeout=10.0) as resp:
+            reset_data = json.loads(resp.read())
+        obs = reset_data.get("observation", {})
+        print(f"[PREFLIGHT] reset() OK, observation keys: {list(obs.keys())[:5]}")
+    except Exception as e:
+        print(f"[PREFLIGHT] reset() warning: {e} (training may still work)")
 
 # ── Fix 1: Import authoritative reward functions from server/reward.py ──────
 # This ensures training optimises the SAME signal the deployed demo evaluates.
@@ -87,7 +126,11 @@ except ImportError:
 
     # Local fallback server_reward_format
     server_reward_format = None  # Will use local reward_format below
-from datasets import Dataset
+
+try:
+    from datasets import Dataset
+except ImportError:
+    Dataset = None  # Deferred: only needed during actual training
 
 # ============================================================
 # CELL 3 — Prompt template
@@ -723,11 +766,37 @@ def train(
     lr:           float = 5e-6,
     max_seq_len:  int = 3072,
     eval_after:   bool = False,
+    offline:      bool = False,
+    env_url:      str = "",
+    wandb_disabled: bool = False,
 ):
     print("=" * 60)
     print("  UndertriAI — GRPO Training with Unsloth")
     print(f"  Model: Qwen2.5-3B-Instruct | Stage: {stage}")
     print("=" * 60)
+
+    # ── Change 1: Print mode ──
+    if offline:
+        print("[MODE] Offline scoring (local)")
+    else:
+        print(f"[MODE] Environment API: {env_url}")
+        preflight_check(env_url)
+
+    # ── Change 2: WandB init ──
+    _use_wandb = _WANDB_AVAILABLE and not wandb_disabled
+    if _use_wandb:
+        wandb.init(
+            project="undertri-bail-rl",
+            name=f"grpo-run-{datetime.now().strftime('%Y%m%d-%H%M')}",
+            config={
+                "env_url": env_url if not offline else "offline",
+                "steps": max_steps,
+                "model": "Qwen2.5-3B",
+                "reward_formula": "outcome + flight_risk + statutory + conditions + rq + format - bias + 0.05*process",
+            }
+        )
+    elif not wandb_disabled:
+        print("[wandb] wandb not installed — skipping logging")
 
     # ── Load model ──────────────────────────────────────────
     from unsloth import FastLanguageModel  # type: ignore
@@ -760,6 +829,10 @@ def train(
     # Reward wrapper that unpacks the stored JSON episode
     # Fix 1.3: Expand episode list if TRL doesn't repeat columns for num_generations
     _stage_for_closure = stage  # Fix 1.4: capture value, not loop variable
+    _offline_mode = offline  # Capture for closure
+    _env_url_for_closure = env_url
+    _use_wandb_closure = _use_wandb
+
     def reward_fn(completions: List[str], episode: List[str] = None, **kwargs) -> List[float]:
         ep_raw = episode or kwargs.get("episode", [])
         ep_objs = [json.loads(e) if isinstance(e, str) else e for e in ep_raw]
@@ -767,7 +840,50 @@ def train(
         if ep_objs and len(ep_objs) < len(completions):
             n_gen = len(completions) // len(ep_objs)
             ep_objs = [ep for ep in ep_objs for _ in range(n_gen)]
-        return combined_reward(completions, ep_objs[:len(completions)], current_stage=_stage_for_closure)
+
+        # Change 1: Switch between offline and env API scoring
+        if _offline_mode:
+            rewards = combined_reward(completions, ep_objs[:len(completions)], current_stage=_stage_for_closure)
+        else:
+            rewards = []
+            for comp, ep in zip(completions, ep_objs[:len(completions)]):
+                r = rollout_via_env_api(comp, ep, env_url=_env_url_for_closure)
+                rewards.append(r)
+
+        # Change 2: WandB per-step logging for individual completions
+        if _use_wandb_closure and rewards:
+            for i, (comp, ep) in enumerate(zip(completions[:len(rewards)], ep_objs[:len(rewards)])):
+                parsed = parse_model_output(comp)
+                gt = ep.get("ground_truth", {})
+                if _USE_SERVER_REWARDS:
+                    om = compute_outcome_match(parsed["recommended_outcome"], gt)
+                    rq = compute_reasoning_quality(
+                        flight_risk_justification=parsed.get("flight_risk_just", ""),
+                        agent_risk_label=parsed.get("flight_risk", ""),
+                        statutory_computation=parsed.get("statutory_computation", ""),
+                        grounds_for=parsed.get("grounds_for", []),
+                        grounds_against=parsed.get("grounds_against", []),
+                        episode=ep,
+                    )
+                    bias = _server_bias(
+                        parsed["recommended_outcome"], ep,
+                        agent_grounds=parsed.get("grounds_for", []) + parsed.get("grounds_against", []),
+                    )
+                else:
+                    om = reward_outcome_match([comp], [ep])[0]
+                    rq = 0.5
+                    bias = reward_no_bias([comp], [ep])[0]
+                fmt = reward_format_single(comp)
+                wandb.log({
+                    "combined_reward": rewards[i],
+                    "reasoning_quality": rq,
+                    "format_compliance": fmt,
+                    "outcome_match": om,
+                    "bias_penalty": bias,
+                    "episode_id": ep.get("case_id", ""),
+                })
+
+        return rewards
 
     # ── GRPO Config ──────────────────────────────────────────
     from trl import GRPOConfig, GRPOTrainer  # type: ignore
@@ -851,6 +967,17 @@ def train(
 
     # Save training plots (C6)
     save_training_plots(trainer.state.log_history, output_dir)
+
+    # ── Change 2: WandB finalize ──
+    if _use_wandb:
+        all_rewards = [
+            e.get("reward", 0.0) for e in trainer.state.log_history if "reward" in e
+        ]
+        if all_rewards:
+            wandb.log({"final_reward_mean": sum(all_rewards) / len(all_rewards)})
+        run_url = wandb.run.get_url() if wandb.run else "N/A"
+        wandb.finish()
+        print(f"WandB run URL: {run_url}")
 
     return results
 
@@ -1723,10 +1850,21 @@ if __name__ == "__main__":
                         help="Run self-improving curriculum training (all 4 stages)")
     parser.add_argument("--adaptive",      action="store_true",
                         help="Run adaptive self-improvement training (Theme 4)")
-    parser.add_argument("--env_url",       default="http://localhost:8000",
-                        help="Server URL for adaptive training")
+    parser.add_argument("--env_url",       default=None,
+                        help="Environment server URL (required unless --offline)")
+    parser.add_argument("--offline",       action="store_true",
+                        help="Use offline local scoring (no env server needed)")
+    parser.add_argument("--wandb_disabled", action="store_true",
+                        help="Disable WandB logging")
 
     args = parser.parse_args()
+
+    # Change 1: Validate env_url requirement
+    if not args.offline and not args.baseline_only and args.env_url is None:
+        parser.error(
+            "env_url is required. Pass --env_url https://your-space.hf.space "
+            "or use --offline for local testing."
+        )
 
     if args.baseline_only:
         evaluate_baseline(args.episodes_dir)
@@ -1738,6 +1876,8 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
         )
     elif args.adaptive:
+        if args.env_url is None:
+            parser.error("--env_url is required for adaptive training.")
         train_adaptive(
             episodes_dir=args.episodes_dir,
             output_dir=args.output,
@@ -1754,5 +1894,8 @@ if __name__ == "__main__":
             max_steps    = args.steps,
             batch_size   = args.batch_size,
             eval_after   = args.eval_after,
+            offline      = args.offline,
+            env_url      = args.env_url or "",
+            wandb_disabled = args.wandb_disabled,
         )
 
