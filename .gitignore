@@ -34,3 +34,9 @@ Thumbs.db
 # Logs
 *.log
 wandb/
+
+# Captured HF Jobs stdout (regenerate via `hf jobs logs <id> > training_log.txt`)
+training_log.txt
+
+# Runtime training plot output (canonical README plots live in assets/results/)
+outputs/**/*.png
