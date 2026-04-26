@@ -1104,6 +1104,67 @@ def save_training_plots(log_history: list, output_dir: str) -> None:
         print(f"  Plot saved: {loss_path}")
 
 
+def save_comparison_plot(stage_results: Dict[int, Dict[str, float]], output_dir: str) -> None:
+    """
+    Save a baseline-vs-trained comparison bar chart per curriculum stage.
+
+    Expects `stage_results` with shape:
+        { stage_int: {"baseline": float, "post": float, "delta": float}, ... }
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("[WARNING] matplotlib not installed — skipping comparison plot.")
+        return
+
+    if not stage_results:
+        print("[WARNING] No stage results — skipping comparison plot.")
+        return
+
+    plots_dir = Path(output_dir) / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    stages    = list(stage_results.keys())
+    baselines = [stage_results[s].get("baseline", 0.0) for s in stages]
+    posts     = [stage_results[s].get("post",     0.0) for s in stages]
+
+    x = np.arange(len(stages))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor("#0a0d1a")
+    ax.set_facecolor("#0a0d1a")
+    bars1 = ax.bar(x - width / 2, baselines, width, label="Before (baseline)", color="#94a3b8")
+    bars2 = ax.bar(x + width / 2, posts,     width, label="After (trained)",   color="#14b8a6")
+
+    for b, v in zip(bars1, baselines):
+        ax.text(b.get_x() + b.get_width() / 2, v + 0.01, f"{v:.3f}",
+                ha="center", color="#cbd5e1", fontsize=9)
+    for b, v in zip(bars2, posts):
+        ax.text(b.get_x() + b.get_width() / 2, v + 0.01, f"{v:.3f}",
+                ha="center", color="#cbd5e1", fontsize=9)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Stage {s}" for s in stages], color="#94a3b8")
+    ax.set_ylabel("Mean Reward", color="#94a3b8")
+    ax.set_title("UndertriAI — Before vs After Training (per stage)",
+                 color="#e2e8f0", pad=12)
+    ax.tick_params(colors="#94a3b8")
+    ax.grid(True, alpha=0.2, axis="y")
+    ax.legend(facecolor="#111827", edgecolor="#1e2d45", labelcolor="#94a3b8")
+    for spine in ax.spines.values():
+        spine.set_color("#1e2d45")
+
+    fig.tight_layout()
+    out_path = plots_dir / "before_after_comparison.png"
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight", facecolor="#0a0d1a")
+    plt.close(fig)
+    print(f"  Plot saved: {out_path}")
+
+
 # ============================================================
 # CELL 7 — Evaluate baseline (before training)
 # ============================================================
@@ -1170,6 +1231,7 @@ def evaluate_on_stage(
     episodes_dir: str,
     stage: int,
     n_samples: int = 20,
+    max_new_tokens: int = 512,
 ) -> Tuple[float, List[Dict]]:
     """
     Evaluate the current model on held-out cases from a specific stage.
@@ -1196,7 +1258,7 @@ def evaluate_on_stage(
         ).to(model.device)
 
         with torch.no_grad():
-            out = model.generate(inputs, max_new_tokens=512, temperature=0.7, do_sample=True)
+            out = model.generate(inputs, max_new_tokens=max_new_tokens, temperature=0.7, do_sample=True)
 
         completion = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
         r = combined_reward([completion], [ep], current_stage=stage)[0]
@@ -1258,6 +1320,8 @@ def train_curriculum(
     lr: float = 5e-6,
     threshold: float = STAGE_THRESHOLD,
     wandb_disabled: bool = False,
+    max_completion_length: int = 512,
+    episode_quota: Dict[int, int] = None,
 ):
     """
     Self-improving curriculum training.
@@ -1327,7 +1391,8 @@ def train_curriculum(
         # ── Baseline eval for this stage ──
         print(f"\n  Evaluating baseline on Stage {stage}...")
         baseline_reward, _ = evaluate_on_stage(
-            model, tokenizer, episodes_dir, stage, n_samples=20
+            model, tokenizer, episodes_dir, stage, n_samples=20,
+            max_new_tokens=max_completion_length,
         )
         print(f"  Stage {stage} baseline: {baseline_reward:.4f}")
 
@@ -1336,6 +1401,14 @@ def train_curriculum(
         if not episodes:
             print(f"  ⚠ No episodes for stage {stage} — skipping")
             continue
+
+        # Demo-mode: cap episodes per stage if quota was provided
+        if episode_quota and stage in episode_quota:
+            quota_n = episode_quota[stage]
+            if quota_n and quota_n < len(episodes):
+                episodes = episodes[:quota_n]
+                print(f"  [DEMO] Capped Stage {stage} to {quota_n} episodes (--episode_quota)")
+
         print(f"  Training on {len(episodes)} episodes...")
 
         # Build HF dataset with potentially enriched prompt
@@ -1377,7 +1450,7 @@ def train_curriculum(
             num_train_epochs=1,
             max_steps=max_steps_per_stage,
             num_generations=4,            # M4: T4-safe (was 6)
-            max_completion_length=512,    # M4: T4-safe (was 1024)
+            max_completion_length=max_completion_length,
             temperature=0.85,             # Better rollout diversity
             beta=0.01,
             logging_steps=5,
@@ -1403,7 +1476,8 @@ def train_curriculum(
         # ── Post-training eval ──
         print(f"\n  Evaluating after Stage {stage} training...")
         post_reward, eval_results = evaluate_on_stage(
-            model, tokenizer, episodes_dir, stage, n_samples=20
+            model, tokenizer, episodes_dir, stage, n_samples=20,
+            max_new_tokens=max_completion_length,
         )
         improvement = post_reward - baseline_reward
         print(f"  Stage {stage}: {baseline_reward:.4f} → {post_reward:.4f} "
@@ -1479,6 +1553,28 @@ def train_curriculum(
         tokenizer.save_pretrained(stage_output)
         print(f"  Checkpoint saved (adapters): {stage_output}")
 
+        # ── Per-stage artefacts: reward curve + incremental results JSON ──
+        # Saved inside the loop so partial curricula (e.g. timeout after Stage 1)
+        # still leave behind a usable plot and a results file for the judges.
+        try:
+            save_training_plots(trainer.state.log_history, stage_output)
+        except Exception as plot_err:
+            print(f"  [WARNING] Could not save Stage {stage} plot ({type(plot_err).__name__}: {plot_err})")
+
+        try:
+            partial_path = Path(output_dir) / "curriculum_results.json"
+            partial_path.parent.mkdir(parents=True, exist_ok=True)
+            partial_path.write_text(json.dumps({
+                "stages": stage_results,
+                "traces_harvested": len(accumulated_traces),
+                "threshold": threshold,
+                "completed_stages": list(stage_results.keys()),
+                "in_progress": False,
+            }, indent=2))
+            print(f"  Incremental results saved: {partial_path}")
+        except Exception as json_err:
+            print(f"  [WARNING] Could not write incremental results ({type(json_err).__name__}: {json_err})")
+
     # ── Final summary ──
     print(f"\n{'═' * 60}")
     print("  CURRICULUM TRAINING COMPLETE")
@@ -1510,6 +1606,12 @@ def train_curriculum(
         save_training_plots(trainer.state.log_history, output_dir)
     except Exception:
         print("  [WARNING] Could not save training plots.")
+
+    # Save baseline-vs-trained comparison plot (one bar pair per stage)
+    try:
+        save_comparison_plot(stage_results, output_dir)
+    except Exception as cmp_err:
+        print(f"  [WARNING] Could not save comparison plot ({type(cmp_err).__name__}: {cmp_err})")
 
     finish_wandb()
     return stage_results
@@ -1939,8 +2041,30 @@ if __name__ == "__main__":
                         help="Use offline local scoring (no env server needed)")
     parser.add_argument("--wandb_disabled", action="store_true",
                         help="Disable WandB logging")
+    parser.add_argument("--max_completion_length", type=int, default=728,
+                        help="Max completion (and eval generation) tokens per rollout. "
+                             "Higher = fewer truncations, higher rewards, slower steps.")
+    parser.add_argument("--episode_quota", default="30,30,30,30",
+                        help="Comma-separated per-stage train cap for --curriculum mode "
+                             "(e.g. '30,30,30,30' = 120 cases total, balanced across "
+                             "stages 1-4). Each stage's pool is read from its own "
+                             "episodes_stage_N.jsonl, so the curriculum ordering is "
+                             "preserved. Pass empty string '' to use the full splits.")
 
     args = parser.parse_args()
+
+    # Parse episode quota string into a {stage: count} dict
+    parsed_quota: Dict[int, int] = {}
+    if args.episode_quota:
+        try:
+            counts = [int(x) for x in args.episode_quota.split(",") if x.strip()]
+            default_stages = [1, 2, 3, 4]
+            parsed_quota = {s: n for s, n in zip(default_stages, counts) if n > 0}
+        except ValueError:
+            parser.error(
+                f"--episode_quota must be comma-separated ints "
+                f"(got {args.episode_quota!r})"
+            )
 
     # Change 1: Validate env_url requirement
     if not args.offline and not args.baseline_only and args.env_url is None:
@@ -1959,6 +2083,8 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             grad_accum=args.grad_accum,
             wandb_disabled=args.wandb_disabled,
+            max_completion_length=args.max_completion_length,
+            episode_quota=parsed_quota or None,
         )
     elif args.adaptive:
         if args.env_url is None:
