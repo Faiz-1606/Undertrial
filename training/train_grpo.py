@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import urllib.request
+import unsloth
 import urllib.parse
 
 try:
