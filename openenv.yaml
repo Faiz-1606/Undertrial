@@ -131,7 +131,7 @@ endpoints:
 training:
   method: GRPO
   framework: TRL + Unsloth
-  model: unsloth/Qwen2.5-3B-Instruct
+  model: unsloth/Qwen2.5-1.5B-Instruct
   notebook: training/UndertriAI_GRPO_Training.ipynb
   script: training/train_grpo.py
   modes:

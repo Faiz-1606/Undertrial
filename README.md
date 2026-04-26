@@ -189,7 +189,7 @@ All components are **fully deterministic and rule-based** — no LLM-as-judge.
 
 ## Training
 
-Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-3B-Instruct`.
+Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-1.5B-Instruct`.
 
 ### Training Modes
 

@@ -1,6 +1,6 @@
 """
 UndertriAI — GRPO Training Script
-Fine-tunes Qwen2.5-3B-Instruct using Group Relative Policy Optimization
+Fine-tunes Qwen2.5-1.5B-Instruct using Group Relative Policy Optimization
 against the UndertriAI bail assessment environment.
 
 Run in Google Colab (T4 GPU recommended):
@@ -819,7 +819,7 @@ def train(
 ):
     print("=" * 60)
     print("  UndertriAI — GRPO Training with Unsloth")
-    print(f"  Model: Qwen2.5-3B-Instruct | Stage: {stage}")
+    print(f"  Model: Qwen2.5-1.5B-Instruct | Stage: {stage}")
     print("=" * 60)
 
     # ── Change 1: Print mode ──
@@ -838,7 +838,7 @@ def train(
             "stage": stage,
             "env_url": env_url if not offline else "offline",
             "steps": max_steps,
-            "model": "Qwen2.5-3B",
+            "model": "Qwen2.5-1.5B",
             "reward_formula": "outcome + flight_risk + statutory + conditions + rq + format - bias + 0.05*process",
         },
         enabled=not wandb_disabled,
@@ -848,7 +848,7 @@ def train(
     from unsloth import FastLanguageModel  # type: ignore
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name   = "unsloth/Qwen2.5-3B-Instruct",
+        model_name   = "unsloth/Qwen2.5-1.5B-Instruct",
         max_seq_length = max_seq_len,
         load_in_4bit = True,
         fast_inference = False,
@@ -1171,14 +1171,14 @@ def save_comparison_plot(stage_results: Dict[int, Dict[str, float]], output_dir:
 
 def evaluate_baseline(episodes_dir: str, n_samples: int = 20):
     """
-    Quick evaluation of a zero-shot Qwen2.5-3B-Instruct on bail cases.
+    Quick evaluation of a zero-shot Qwen2.5-1.5B-Instruct on bail cases.
     Run this BEFORE training to get the baseline reward curve starting point.
     """
     print("\nEvaluating zero-shot baseline...")
     from unsloth import FastLanguageModel  # type: ignore
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name   = "unsloth/Qwen2.5-3B-Instruct",
+        model_name   = "unsloth/Qwen2.5-1.5B-Instruct",
         max_seq_length = 3072,
         load_in_4bit = True,
     )
@@ -1347,7 +1347,7 @@ def train_curriculum(
             "mode": "curriculum",
             "stages": stages,
             "steps_per_stage": max_steps_per_stage,
-            "model": "Qwen2.5-3B",
+            "model": "Qwen2.5-1.5B",
             "threshold": threshold,
         },
         enabled=not wandb_disabled,
@@ -1358,7 +1358,7 @@ def train_curriculum(
 
     # Load model once — reused across all stages
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen2.5-3B-Instruct",
+        model_name="unsloth/Qwen2.5-1.5B-Instruct",
         max_seq_length=3072,
         load_in_4bit=True,
         fast_inference=False,
@@ -1391,7 +1391,7 @@ def train_curriculum(
         # ── Baseline eval for this stage ──
         print(f"\n  Evaluating baseline on Stage {stage}...")
         baseline_reward, _ = evaluate_on_stage(
-            model, tokenizer, episodes_dir, stage, n_samples=20,
+            model, tokenizer, episodes_dir, stage, n_samples=12,
             max_new_tokens=max_completion_length,
         )
         print(f"  Stage {stage} baseline: {baseline_reward:.4f}")
@@ -1476,7 +1476,7 @@ def train_curriculum(
         # ── Post-training eval ──
         print(f"\n  Evaluating after Stage {stage} training...")
         post_reward, eval_results = evaluate_on_stage(
-            model, tokenizer, episodes_dir, stage, n_samples=20,
+            model, tokenizer, episodes_dir, stage, n_samples=12,
             max_new_tokens=max_completion_length,
         )
         improvement = post_reward - baseline_reward
@@ -1662,7 +1662,7 @@ def train_adaptive(
             "steps_per_assessment": steps_per_assessment,
             "max_total_steps": max_total_steps,
             "base_url": base_url,
-            "model": "Qwen2.5-3B",
+            "model": "Qwen2.5-1.5B",
         },
         enabled=not wandb_disabled,
     )
@@ -1672,7 +1672,7 @@ def train_adaptive(
 
     # Load model once
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen2.5-3B-Instruct",
+        model_name="unsloth/Qwen2.5-1.5B-Instruct",
         max_seq_length=3072,
         load_in_4bit=True,
         fast_inference=False,
@@ -2024,7 +2024,10 @@ if __name__ == "__main__":
     parser.add_argument("--episodes_dir", default="./data/episodes")
     parser.add_argument("--output",       default="./output/undertrial_grpo")
     parser.add_argument("--stage",        type=int, default=1)
-    parser.add_argument("--steps",        type=int, default=200)
+    parser.add_argument("--steps",        type=int, default=30,
+                        help="Per-stage training steps. Default 30 with the 1.5B base "
+                             "model fits a 4-stage curriculum into ~1h 50m on A10G-large "
+                             "(well under a 3h budget; leaves margin for unexpected slowdowns).")
     parser.add_argument("--batch_size",   type=int, default=1)   # M4: T4-safe (was 4)
     parser.add_argument("--grad_accum", type=int, default=8)
     parser.add_argument("--baseline_only", action="store_true",
@@ -2043,7 +2046,9 @@ if __name__ == "__main__":
                         help="Disable WandB logging")
     parser.add_argument("--max_completion_length", type=int, default=728,
                         help="Max completion (and eval generation) tokens per rollout. "
-                             "Higher = fewer truncations, higher rewards, slower steps.")
+                             "728 prevents the reasoning-truncation that hurts rewards at "
+                             "512 tokens. Affordable here because the 1.5B base model is "
+                             "~1.8x faster per step than the original 3B.")
     parser.add_argument("--episode_quota", default="30,30,30,30",
                         help="Comma-separated per-stage train cap for --curriculum mode "
                              "(e.g. '30,30,30,30' = 120 cases total, balanced across "
