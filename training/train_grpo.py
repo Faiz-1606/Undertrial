@@ -15,11 +15,10 @@ Or locally:
 # ============================================================
 # CELL 1 — Install dependencies  (paste into Colab cell)
 # ============================================================
-INSTALL_COMMANDS = """
-!pip install -q "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
-!pip install -q --no-deps trl peft accelerate bitsandbytes xformers
-!pip install -q openenv-core datasets
-"""
+# To install in Colab:
+#   !pip install -q "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+#   !pip install -q --no-deps trl peft accelerate bitsandbytes xformers
+#   !pip install -q openenv-core datasets
 
 # ============================================================
 # CELL 2 — Imports
@@ -39,13 +38,54 @@ except ImportError:
     wandb = None
     _WANDB_AVAILABLE = False
 
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None  # Deferred: only needed during actual training
 
 # ── Environment API (Gap 1) ─────────────────────────────────────────────────
 ENV_API_URL = os.environ.get(
     "UNDERTRIAL_ENV_URL",
     "https://draken1606-undertrial-ai.hf.space",
 )
+
+
+def setup_wandb(
+    *,
+    project: str,
+    run_name: str,
+    config: Dict[str, Any],
+    enabled: bool = True,
+) -> bool:
+    """Initialize WandB if installed and enabled."""
+    if not enabled:
+        return False
+    if not _WANDB_AVAILABLE:
+        print("[wandb] wandb not installed - skipping logging")
+        return False
+
+    api_key = os.environ.get("WANDB_API_KEY", "").strip()
+    if api_key:
+        try:
+            wandb.login(key=api_key, relogin=True)
+        except Exception as exc:
+            print(f"[wandb] login failed, continuing without wandb: {exc}")
+            return False
+    else:
+        print("[wandb] WANDB_API_KEY not set - attempting to reuse existing wandb auth")
+
+    try:
+        wandb.init(project=project, name=run_name, config=config)
+        return True
+    except Exception as exc:
+        print(f"[wandb] init failed, continuing without wandb: {exc}")
+        return False
+
+
+def finish_wandb() -> None:
+    """Finish the active WandB run if one exists."""
+    if _WANDB_AVAILABLE and wandb.run is not None:
+        wandb.finish()
 
 
 def preflight_check(env_url: str) -> None:
@@ -175,6 +215,7 @@ def format_case_prompt(episode: Dict[str, Any]) -> str:
     ipc = ", ".join(episode.get("ipc_sections", []))
     pros = "\n".join(f"  • {a}" for a in episode.get("prosecution_arguments", []))
     defe = "\n".join(f"  • {a}" for a in episode.get("defence_arguments", []))
+    custody = episode.get("custody_months") or 0
 
     prompt = f"""═══ BAIL CASE: {episode.get('case_title', 'Unknown')} ═══
 Court: {episode.get('court', 'Unknown')} | Date: {episode.get('date', 'Unknown')}
@@ -192,7 +233,7 @@ ACCUSED PROFILE:
   Region:      {profile.get('region', 'Unknown')}
   Prior Cases: {profile.get('prior_cases', 'Unknown')}
 
-CUSTODY DURATION: {episode.get('custody_months', 0):.1f} months
+CUSTODY DURATION: {custody:.1f} months
 MAX SENTENCE:     {episode.get('max_sentence_years', 5):.1f} years
 
 PROSECUTION ARGUMENTS:
@@ -374,7 +415,7 @@ def reward_statutory(completions: List[str], episode_batch: List[Dict], **kwargs
             special_laws = "INFERRED"
 
         # Standard IPC/BNSS threshold computation
-        half_sent_months = (max_sent * 12) / 2
+        half_sent_months = (max_sent * 12) / 3.0
         truly_eligible = (custody >= half_sent_months) and not special_laws
 
         score = 0.0
@@ -465,13 +506,13 @@ def combined_reward(
     """
     Master reward combining all components.
 
-    Formula (B6/B8 update):
+    Formula:
         R = 0.4*outcome_gated + 0.2*flight_risk + 0.2*statutory + 0.2*condition
-          + 0.1*reasoning_quality + 0.05*format
+          + 0.1*reasoning_quality + 0.05*format + 0.05*process_bonus
           - 0.3*bias
 
     Core (sum=1.0): 0.4*om_gated + 0.2*fr + 0.2*s + 0.2*ca
-    Bonuses:        0.1*rq + 0.05*fmt
+    Bonuses:        0.1*rq + 0.05*fmt + 0.05*process
     Penalty:        -0.3*bias
 
     Uses server/reward.py functions when available (Fix 1).
@@ -542,7 +583,7 @@ def combined_reward(
         custody_mo = ep.get("custody_months") or 0.0
         max_sent   = ep.get("max_sentence_years", 5.0)
         if custody_mo > 0:
-            threshold_mo = (max_sent * 12) / 2
+            threshold_mo = (max_sent * 12) / 3.0
             comp_text = parsed.get("statutory_computation", "").lower()
             has_exact_custody   = str(int(custody_mo))   in comp_text
             has_exact_threshold = str(int(threshold_mo)) in comp_text
@@ -783,20 +824,19 @@ def train(
         preflight_check(env_url)
 
     # ── Change 2: WandB init ──
-    _use_wandb = _WANDB_AVAILABLE and not wandb_disabled
-    if _use_wandb:
-        wandb.init(
-            project="undertri-bail-rl",
-            name=f"grpo-run-{datetime.now().strftime('%Y%m%d-%H%M')}",
-            config={
-                "env_url": env_url if not offline else "offline",
-                "steps": max_steps,
-                "model": "Qwen2.5-3B",
-                "reward_formula": "outcome + flight_risk + statutory + conditions + rq + format - bias + 0.05*process",
-            }
-        )
-    elif not wandb_disabled:
-        print("[wandb] wandb not installed — skipping logging")
+    _use_wandb = setup_wandb(
+        project="undertri-bail-rl",
+        run_name=f"grpo-run-{datetime.now().strftime('%Y%m%d-%H%M')}",
+        config={
+            "mode": "train",
+            "stage": stage,
+            "env_url": env_url if not offline else "offline",
+            "steps": max_steps,
+            "model": "Qwen2.5-3B",
+            "reward_formula": "outcome + flight_risk + statutory + conditions + rq + format - bias + 0.05*process",
+        },
+        enabled=not wandb_disabled,
+    )
 
     # ── Load model ──────────────────────────────────────────
     from unsloth import FastLanguageModel  # type: ignore
@@ -835,12 +875,7 @@ def train(
 
     def reward_fn(completions: List[str], episode: List[str] = None, **kwargs) -> List[float]:
         ep_raw = episode or kwargs.get("episode", [])
-        print(f"[DEBUG reward_fn] {len(completions)} completions, {len(ep_raw)} episodes, kwargs_keys={list(kwargs.keys())}")
-        if ep_raw:
-            try:
-                sample = json.loads(ep_raw[0]) if isinstance(ep_raw[0], str) else ep_raw[0]
-                print(f"[DEBUG reward_fn] episode[0] has keys: {list(sample.keys())[:5]}, GT={sample.get('ground_truth',{}).get('outcome','?')}")
-            except: pass
+
         ep_objs = [json.loads(e) if isinstance(e, str) else e for e in ep_raw]
         # Expand if TRL passed batch-sized episodes (not repeated for num_generations)
         if ep_objs and len(ep_objs) < len(completions):
@@ -856,38 +891,36 @@ def train(
                 r = rollout_via_env_api(comp, ep, env_url=_env_url_for_closure)
                 rewards.append(r)
 
-        # Change 2: WandB per-step logging for individual completions
+        # Change 2: WandB per-step reward component logging
         if _use_wandb_closure and rewards:
-            for i, (comp, ep) in enumerate(zip(completions[:len(rewards)], ep_objs[:len(rewards)])):
-                parsed = parse_model_output(comp)
-                gt = ep.get("ground_truth", {})
-                if _USE_SERVER_REWARDS:
-                    om = compute_outcome_match(parsed["recommended_outcome"], gt)
-                    rq = compute_reasoning_quality(
-                        flight_risk_justification=parsed.get("flight_risk_just", ""),
-                        agent_risk_label=parsed.get("flight_risk", ""),
-                        statutory_computation=parsed.get("statutory_computation", ""),
-                        grounds_for=parsed.get("grounds_for", []),
-                        grounds_against=parsed.get("grounds_against", []),
-                        episode=ep,
-                    )
-                    bias = _server_bias(
-                        parsed["recommended_outcome"], ep,
-                        agent_grounds=parsed.get("grounds_for", []) + parsed.get("grounds_against", []),
-                    )
-                else:
-                    om = reward_outcome_match([comp], [ep])[0]
-                    rq = 0.5
-                    bias = reward_no_bias([comp], [ep])[0]
-                fmt = reward_format_single(comp)
-                wandb.log({
-                    "combined_reward": rewards[i],
-                    "reasoning_quality": rq,
-                    "format_compliance": fmt,
-                    "outcome_match": om,
-                    "bias_penalty": bias,
-                    "episode_id": ep.get("case_id", ""),
-                })
+            step = kwargs.get("step", None)
+            avg_reward = sum(rewards) / len(rewards)
+            comp_sample = completions[0]
+            ep_sample = ep_objs[0] if ep_objs else {}
+            parsed_sample = parse_model_output(comp_sample)
+            gt_sample = ep_sample.get("ground_truth", {})
+            if _USE_SERVER_REWARDS:
+                om = compute_outcome_match(parsed_sample["recommended_outcome"], gt_sample)
+                bias = _server_bias(
+                    parsed_sample["recommended_outcome"],
+                    ep_sample,
+                    agent_grounds=parsed_sample.get("grounds_for", []) + parsed_sample.get("grounds_against", []),
+                )
+            else:
+                om = reward_outcome_match([comp_sample], [ep_sample])[0]
+                bias = reward_no_bias([comp_sample], [ep_sample])[0]
+            fmt = reward_format_single(comp_sample)
+            log_dict = {
+                "reward/combined_mean": avg_reward,
+                "reward/outcome_match": om,
+                "reward/format": fmt,
+                "reward/bias_penalty": bias,
+                "reward/std": (sum((r - avg_reward) ** 2 for r in rewards) / len(rewards)) ** 0.5,
+            }
+            if step is not None:
+                wandb.log(log_dict, step=step)
+            else:
+                wandb.log(log_dict)
 
         return rewards
 
@@ -907,7 +940,7 @@ def train(
         beta                    = 0.01,        # KL penalty coefficient
         logging_steps           = 5,
         save_steps              = 50,
-        report_to               = "none",
+        report_to               = "wandb" if _use_wandb else "none",
         remove_unused_columns   = False,
     )
 
@@ -925,7 +958,7 @@ def train(
     trainer = GRPOTrainer(
         model            = model,
         processing_class = tokenizer,
-        config           = config,
+        args             = config,
         train_dataset    = dataset,
         reward_funcs     = [reward_fn],
         callbacks        = callbacks,
@@ -982,7 +1015,7 @@ def train(
         if all_rewards:
             wandb.log({"final_reward_mean": sum(all_rewards) / len(all_rewards)})
         run_url = wandb.run.get_url() if wandb.run else "N/A"
-        wandb.finish()
+        finish_wandb()
         print(f"WandB run URL: {run_url}")
 
     return results
@@ -1215,6 +1248,7 @@ def train_curriculum(
     grad_accum: int = 8,   # M4: compensate to keep effective batch ~8
     lr: float = 5e-6,
     threshold: float = STAGE_THRESHOLD,
+    wandb_disabled: bool = False,
 ):
     """
     Self-improving curriculum training.
@@ -1232,6 +1266,19 @@ def train_curriculum(
     print("  UndertriAI — Self-Improving Curriculum Training")
     print(f"  Stages: {stages} | Threshold: {threshold:.0%}")
     print("=" * 60)
+
+    use_wandb = setup_wandb(
+        project="undertri-bail-rl",
+        run_name=f"grpo-curriculum-{datetime.now().strftime('%Y%m%d-%H%M')}",
+        config={
+            "mode": "curriculum",
+            "stages": stages,
+            "steps_per_stage": max_steps_per_stage,
+            "model": "Qwen2.5-3B",
+            "threshold": threshold,
+        },
+        enabled=not wandb_disabled,
+    )
 
     from unsloth import FastLanguageModel  # type: ignore
     from trl import GRPOConfig, GRPOTrainer  # type: ignore
@@ -1326,7 +1373,7 @@ def train_curriculum(
             beta=0.01,
             logging_steps=5,
             save_steps=50,
-            report_to="none",
+            report_to="wandb" if use_wandb else "none",
             remove_unused_columns=False,
         )
 
@@ -1338,7 +1385,7 @@ def train_curriculum(
         trainer = GRPOTrainer(
             model=model,
             processing_class=tokenizer,
-            config=config,
+            args=config,
             train_dataset=dataset,
             reward_funcs=[reward_fn],
         )
@@ -1435,7 +1482,7 @@ def train_curriculum(
 
     # Save final model (adapters only — merge separately if needed)
     final_dir = f"{output_dir}/final"
-    model.save_pretrained(final_dir, save_adapters_only=True)
+    model.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
     print(f"\n  Final model saved (adapters): {final_dir}")
 
@@ -1455,6 +1502,7 @@ def train_curriculum(
     except Exception:
         print("  [WARNING] Could not save training plots.")
 
+    finish_wandb()
     return stage_results
 
 
@@ -1467,10 +1515,11 @@ def train_adaptive(
     output_dir: str = "./output/undertrial_adaptive",
     steps_per_assessment: int = 50,
     max_total_steps: int = 2000,
-    batch_size: int = 4,
+    batch_size: int = 1,   # M4: T4-safe
     grad_accum: int = 4,
     lr: float = 5e-6,
     base_url: str = "http://localhost:8000",
+    wandb_disabled: bool = False,
 ):
     """
     Self-directed curriculum training (Theme 4).
@@ -1493,6 +1542,19 @@ def train_adaptive(
     print(f"  Assessment every {steps_per_assessment} steps | Max {max_total_steps} steps")
     print(f"  Server: {base_url}")
     print("=" * 60)
+
+    use_wandb = setup_wandb(
+        project="undertri-bail-rl",
+        run_name=f"grpo-adaptive-{datetime.now().strftime('%Y%m%d-%H%M')}",
+        config={
+            "mode": "adaptive",
+            "steps_per_assessment": steps_per_assessment,
+            "max_total_steps": max_total_steps,
+            "base_url": base_url,
+            "model": "Qwen2.5-3B",
+        },
+        enabled=not wandb_disabled,
+    )
 
     from unsloth import FastLanguageModel  # type: ignore
     from trl import GRPOConfig, GRPOTrainer  # type: ignore
@@ -1538,7 +1600,7 @@ def train_adaptive(
 
     current_stage = 1
     total_steps = 0
-    session_id = f"adaptive_{uuid.uuid4().hex[:8]}" if 'uuid' in dir() else "adaptive_training"
+    # uuid is imported below — this line is just a placeholder before the real assignment
 
     # Try to initialise session on server
     import uuid as _uuid_mod
@@ -1571,9 +1633,13 @@ def train_adaptive(
         dataset = build_hf_dataset(episodes, tokenizer)
         stage_for_closure = current_stage  # Capture for closure
 
-        def reward_fn(completions: List[str], episode: List[str], **kwargs) -> List[float]:
-            ep_objs = [json.loads(e) for e in episode]
-            return combined_reward(completions, ep_objs, current_stage=stage_for_closure)
+        def reward_fn(completions: List[str], episode: List[str] = None, **kwargs) -> List[float]:
+            ep_raw = episode or kwargs.get("episode", [])
+            ep_objs = [json.loads(e) if isinstance(e, str) else e for e in ep_raw]
+            if ep_objs and len(ep_objs) < len(completions):
+                n_gen = len(completions) // len(ep_objs)
+                ep_objs = [ep for ep in ep_objs for _ in range(n_gen)]
+            return combined_reward(completions, ep_objs[:len(completions)], current_stage=stage_for_closure)
 
         block_output = f"{output_dir}/block_{total_steps}"
         config = GRPOConfig(
@@ -1583,13 +1649,13 @@ def train_adaptive(
             gradient_accumulation_steps=grad_accum,
             num_train_epochs=1,
             max_steps=steps_per_assessment,
-            num_generations=6,
+            num_generations=4,   # M4: T4-safe
             max_completion_length=1024,
             temperature=0.7,
             beta=0.01,
             logging_steps=5,
             save_steps=steps_per_assessment,
-            report_to="none",
+            report_to="wandb" if use_wandb else "none",
             remove_unused_columns=False,
         )
 
@@ -1597,7 +1663,7 @@ def train_adaptive(
         trainer = GRPOTrainer(
             model=model,
             processing_class=tokenizer,
-            config=config,
+            args=config,
             train_dataset=dataset,
             reward_funcs=[reward_fn],
         )
@@ -1656,7 +1722,7 @@ def train_adaptive(
                 break
 
         # Save checkpoint
-        model.save_pretrained(block_output, save_adapters_only=True)
+        model.save_pretrained(block_output)
         tokenizer.save_pretrained(block_output)
 
     # ── Final summary ──
@@ -1692,7 +1758,7 @@ def train_adaptive(
 
     # Save final model
     final_dir = f"{output_dir}/final"
-    model.save_pretrained(final_dir, save_adapters_only=True)
+    model.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
     print(f"  Final model saved: {final_dir}")
 
@@ -1701,6 +1767,7 @@ def train_adaptive(
     adaptive_log = [{"step": s, "reward": r} for s, r in reward_curve]
     save_training_plots(adaptive_log, output_dir)
 
+    finish_wandb()
     return results
 
 
@@ -1880,6 +1947,7 @@ if __name__ == "__main__":
             output_dir=args.output,
             max_steps_per_stage=args.steps,
             batch_size=args.batch_size,
+            wandb_disabled=args.wandb_disabled,
         )
     elif args.adaptive:
         if args.env_url is None:
@@ -1891,6 +1959,7 @@ if __name__ == "__main__":
             max_total_steps=2000,
             batch_size=args.batch_size,
             base_url=args.env_url,
+            wandb_disabled=args.wandb_disabled,
         )
     else:
         train(

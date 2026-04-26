@@ -209,14 +209,17 @@ openenv push --repo-id username/undertri-ai
 # 2. Verify it is running
 curl https://username-undertri-ai.hf.space/health
 
-# 3. Run training (HF Job on L4)
+# 3. Set WandB auth in your shell or job environment
+export WANDB_API_KEY=your_wandb_api_key
+
+# 4. Run training (HF Job on L4)
 hf jobs uv run --flavor l4x1 \
   python training/train_grpo.py \
   --steps 50 \
   --env_url https://username-undertri-ai.hf.space \
   --adaptive
 
-# 4. Run training (local with offline scoring for testing only)
+# 5. Run training (local with offline scoring for testing only)
 python training/train_grpo.py \
   --steps 10 \
   --offline
@@ -236,6 +239,8 @@ Key metrics logged per step:
 
 ### Google Colab Training Walkthrough
 
+For WandB-backed runs, set `WANDB_API_KEY` before launching `training/train_grpo.py`. The script now auto-logins from that environment variable for local runs and HF compute jobs.
+
 ```python
 # ============================================================
 # STEP 1 — Install dependencies (run in first cell)
@@ -243,6 +248,10 @@ Key metrics logged per step:
 !pip install -q "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
 !pip install -q --no-deps trl peft accelerate bitsandbytes xformers
 !pip install -q openenv-core datasets
+!pip install -q wandb
+
+import os
+os.environ["WANDB_API_KEY"] = "your_wandb_api_key"
 
 # ============================================================
 # STEP 2 — Clone the repository
