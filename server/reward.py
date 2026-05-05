@@ -46,7 +46,8 @@ def compute_outcome_match(agent_outcome: str, ground_truth: Dict[str, Any]) -> f
         1.0 — Exact string match
         0.9 — "Bail Conditional" vs "Bail Granted" (conditional IS bail)
         0.8 — Directionally correct but loose string
-        0.0 — Wrong direction (granted vs. denied, or vice versa)
+       -0.3 — Wrong direction (granted vs. denied, or vice versa)
+              Active penalty to prevent always-grant exploitation.
     """
     gt = ground_truth["outcome"]
     agent_norm = agent_outcome.strip().lower()
@@ -64,7 +65,9 @@ def compute_outcome_match(agent_outcome: str, ground_truth: Dict[str, Any]) -> f
     agent_granted = "grant" in agent_norm or "conditional" in agent_norm
     gt_granted    = "grant" in gt_norm    or "conditional" in gt_norm
 
-    return 0.8 if (agent_granted == gt_granted) else 0.0
+    # Fix 1b: Wrong direction gets active penalty, not just zero.
+    # This breaks the "always grant" degenerate equilibrium.
+    return 0.8 if (agent_granted == gt_granted) else -0.3
 
 
 # ---------------------------------------------------------------------------
@@ -93,12 +96,12 @@ def compute_flight_risk_accuracy(agent_risk: str, ground_truth: Dict[str, Any]) 
     Scores the agent's flight risk classification.
 
     If the episode has no labeled implicit_flight_risk, returns 0.5 (neutral — no signal).
-    This prevents the agent from gaming a default "Medium" label.
+    Fix 1a: Empty or unrecognized labels return 0.0 (no free ride).
 
     Scoring:
         1.0 — Exact match to GT implicit risk
         0.5 — One tier off (Low↔Medium or Medium↔High)
-        0.0 — Two tiers off (Low vs. High)
+        0.0 — Two tiers off (Low vs. High) OR unrecognized label
         + up to 0.2 keyword bonus from judgment text
     """
     gt_risk = ground_truth.get("implicit_flight_risk")
@@ -108,7 +111,15 @@ def compute_flight_risk_accuracy(agent_risk: str, ground_truth: Dict[str, Any]) 
         return 0.5
 
     risk_scores = {"Low": 0, "Medium": 1, "High": 2}
-    agent_score = risk_scores.get(agent_risk, 1)
+
+    # Fix 1a: Empty or unrecognized agent label → 0.0 (not free Medium).
+    # Previously: risk_scores.get(agent_risk, 1) silently mapped '' to Medium,
+    # giving 0.86 avg score for free on 72% of episodes.
+    agent_norm = agent_risk.strip().capitalize() if agent_risk else ""
+    if agent_norm not in risk_scores:
+        return 0.0
+
+    agent_score = risk_scores[agent_norm]
     gt_score    = risk_scores.get(gt_risk, 1)
     diff        = abs(agent_score - gt_score)
 
@@ -245,6 +256,14 @@ def compute_statutory_accuracy(
     direction_correct = (agent_eligible == truly_eligible)
     has_numbers  = bool(re.search(r'\d+', comp))
     has_time_ref = any(w in comp for w in TIME_WORDS)
+
+    # Fix 1c: If computation text has NO numbers at all, cap at 0.2.
+    # The agent must show actual numeric reasoning, not just say "eligible".
+    if not has_numbers:
+        # Direction-only credit, no computation credit
+        if custody_unreliable:
+            return min(0.2, score, 0.60)
+        return min(0.2, score)
 
     if has_numbers and has_time_ref:
         score += 0.3 if direction_correct else 0.10

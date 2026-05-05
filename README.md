@@ -224,7 +224,7 @@ GRPO correctly ranks `ideal > filler > minimal > spam`.
 
 ## Training
 
-Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-1.5B-Instruct` (4-bit quantized + LoRA r=16 — i.e. **QLoRA**).
+Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-7B-Instruct` (4-bit quantized + LoRA r=16 — i.e. **QLoRA**).
 
 ### Hybrid Training / Evaluation Design
 
@@ -245,22 +245,29 @@ The alternative — pure online training via `rollout_via_env_api()` for every r
 
 | Mode | Command | Description |
 |---|---|---|
-| **Curriculum** *(recommended)* | `python training/train_grpo.py --curriculum --env_url https://your-space.hf.space` | Sequential 4-stage with trace harvesting + per-stage before/after evals |
-| Adaptive | `python training/train_grpo.py --adaptive --env_url https://your-space.hf.space --steps 50` | **Theme 4** — self-directed with auto-promotion |
-| Single-stage (env-API) | `python training/train_grpo.py --stage 1 --env_url https://your-space.hf.space --steps 200` | Score every rollout via live env API |
+| **3-Level Curriculum** *(recommended)* | `python training/train_grpo.py --curriculum --offline` | Format → Reasoning → Adversarial (300 steps total) |
+| Legacy 4-stage | `python training/train_grpo.py --curriculum --offline --difficulties "" --stages 1,2,3,4` | Sequential 4-stage with trace harvesting |
 | Single-stage (offline) | `python training/train_grpo.py --stage 1 --offline --steps 200` | Local scoring (smoke testing) |
 | Baseline only | `python training/train_grpo.py --baseline_only` | Zero-shot eval, no training |
 
-### Default hyperparameters (curriculum mode)
+### 3-Level Difficulty Curriculum
+
+| Level | Focus | Episodes | Steps | What the model learns |
+|-------|-------|----------|-------|-----------------------|
+| **Format** | XML structure, think blocks | 400 (sampled) | 80 | Correct output format |
+| **Reasoning** | Statutory math, flight risk, outcome | 1,200 (all) | 140 | Legal reasoning |
+| **Adversarial** | Bias, schema drift, edge cases | 335 | 80 | Robustness |
+
+### Default hyperparameters
 
 | Parameter | Default | Rationale |
 |---|---|---|
-| Base model | `unsloth/Qwen2.5-1.5B-Instruct` | 4-bit + LoRA r=16; ~30M trainable params |
-| Steps per stage | 30 | Fits 4-stage curriculum into ~1h 50m on A10G |
-| Episode quota | `30,30,30,30` (= 120 cases) | Balanced sample across difficulty buckets |
-| Max completion length | 728 tokens | Prevents reasoning truncation that hurts rewards at 512 |
-| `num_generations` | 4 | GRPO rollouts per prompt |
-| `batch_size × grad_accum` | 1 × 8 | Effective batch 8; T4/A10G safe |
+| Base model | `unsloth/Qwen2.5-7B-Instruct` | 4-bit + LoRA r=16 |
+| Total steps | 300 (80+140+80) | 3-level curriculum, ~2.5h on Kaggle T4 |
+| `num_generations` | 6 | GRPO rollouts per prompt; 50% more variance than 4 |
+| `temperature` | 1.1 | Higher exploration for diverse rollouts |
+| Max completion length | 384 tokens | Fits bail memos; saves VRAM vs 512 |
+| `batch_size × grad_accum` | 1 × 8 | Effective batch 8; Kaggle T4 safe |
 | `learning_rate` | 5e-6 | Curriculum-scale LR |
 
 ### Deploy & Train Workflow

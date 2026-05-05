@@ -71,11 +71,10 @@ reward:
     - bias_penalty: "Penalty for ignoring parity in bias cases (-30%)"
 
 curriculum:
-  stages: 4
-  stage_1: "Landmark cases — legally clear-cut"
-  stage_2: "Standard contested cases"
-  stage_3: "Bias reversal / parity cases"
-  stage_4: "Schema drift (IPC→BNSS, regional FIR formats)"
+  levels: 3
+  format: "Format training — XML structure and think blocks (400 episodes, 80 steps)"
+  reasoning: "Reasoning training — statutory math, flight risk, outcome (1200 episodes, 140 steps)"
+  adversarial: "Adversarial training — bias reversal, schema drift (335 episodes, 80 steps)"
 
 self_improvement:
   adaptive_curriculum:
@@ -131,16 +130,17 @@ endpoints:
 training:
   method: GRPO
   framework: TRL + Unsloth
-  model: unsloth/Qwen2.5-1.5B-Instruct
+  model: unsloth/Qwen2.5-7B-Instruct
   notebook: training/UndertriAI_GRPO_Training.ipynb
   script: training/train_grpo.py
+  total_steps: 300
+  num_generations: 6
+  temperature: 1.1
   modes:
+    - name: curriculum_3level
+      command: "python training/train_grpo.py --curriculum --offline"
     - name: single_stage
-      command: "python training/train_grpo.py --stage 1 --steps 200"
-    - name: curriculum
-      command: "python training/train_grpo.py --curriculum --steps 150"
-    - name: adaptive
-      command: "python training/train_grpo.py --adaptive --steps 50 --env_url http://localhost:8000"
+      command: "python training/train_grpo.py --stage 1 --offline --steps 200"
 
 deployment:
   platform: huggingface-spaces
