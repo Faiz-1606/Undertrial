@@ -1560,7 +1560,7 @@ def train_curriculum(
             max_steps=steps,
             num_generations=4,             # 4 for T4 15GB (6 OOMs)
             max_completion_length=max_completion_length,
-            temperature=1.1,               # Higher exploration (was 0.85)
+            temperature=0.9,               # Balanced: coherent but diverse
             beta=0.01,
             logging_steps=5,
             save_steps=50,
@@ -2176,9 +2176,9 @@ if __name__ == "__main__":
                         help="Use offline local scoring (no env server needed)")
     parser.add_argument("--wandb_disabled", action="store_true",
                         help="Disable WandB logging")
-    parser.add_argument("--max_completion_length", type=int, default=384,
-                        help="Max completion tokens per rollout. 384 for 7B on T4 "
-                             "(saves VRAM vs 512 while bail memos fit in ~300 tokens).")
+    parser.add_argument("--max_completion_length", type=int, default=640,
+                        help="Max completion tokens per rollout. 640 for 7B on T4 "
+                             "(enough for full XML memo output).")
     parser.add_argument("--episode_quota", default="",
                         help="Comma-separated per-stage train cap for legacy --curriculum mode. "
                              "Pass empty string '' to use the full splits (default).")
