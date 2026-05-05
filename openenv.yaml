@@ -72,9 +72,9 @@ reward:
 
 curriculum:
   levels: 3
-  format: "Format training — XML structure and think blocks (400 episodes, 80 steps)"
-  reasoning: "Reasoning training — statutory math, flight risk, outcome (1200 episodes, 140 steps)"
-  adversarial: "Adversarial training — bias reversal, schema drift (335 episodes, 80 steps)"
+  easy: "Easy — landmark clear-cut cases (104 episodes, 60 steps)"
+  medium: "Medium — contested judgment calls (761 episodes, 160 steps)"
+  hard: "Hard — bias reversal + schema drift (335 episodes, 80 steps)"
 
 self_improvement:
   adaptive_curriculum:

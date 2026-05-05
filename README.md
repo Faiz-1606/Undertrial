@@ -252,18 +252,18 @@ The alternative — pure online training via `rollout_via_env_api()` for every r
 
 ### 3-Level Difficulty Curriculum
 
-| Level | Focus | Episodes | Steps | What the model learns |
-|-------|-------|----------|-------|-----------------------|
-| **Format** | XML structure, think blocks | 400 (sampled) | 80 | Correct output format |
-| **Reasoning** | Statutory math, flight risk, outcome | 1,200 (all) | 140 | Legal reasoning |
-| **Adversarial** | Bias, schema drift, edge cases | 335 | 80 | Robustness |
+| Level | Case Type | Episodes | Steps | Difficulty |
+|-------|-----------|----------|-------|------------|
+| **Easy** | Landmark clear-cut cases | 104 | 60 | Model builds confidence on obvious grant/deny |
+| **Medium** | Contested judgment calls | 761 | 160 | Bulk learning — statutory math, risk assessment |
+| **Hard** | Bias reversal + schema drift | 335 | 80 | Edge cases that trip up shortcut-takers |
 
 ### Default hyperparameters
 
 | Parameter | Default | Rationale |
 |---|---|---|
 | Base model | `unsloth/Qwen2.5-7B-Instruct` | 4-bit + LoRA r=16 |
-| Total steps | 300 (80+140+80) | 3-level curriculum, ~2.5h on Kaggle T4 |
+| Total steps | 300 (60+160+80) | 3-level curriculum, ~2.5h on Kaggle T4 |
 | `num_generations` | 6 | GRPO rollouts per prompt; 50% more variance than 4 |
 | `temperature` | 1.1 | Higher exploration for diverse rollouts |
 | Max completion length | 384 tokens | Fits bail memos; saves VRAM vs 512 |

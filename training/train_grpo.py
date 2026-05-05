@@ -640,7 +640,7 @@ def load_episodes(
     """
     Load episodes for a given split.
 
-    If `difficulty` is provided ("format", "reasoning", "adversarial"),
+    If `difficulty` is provided ("easy", "medium", "hard"),
     loads from the corresponding stage files per DIFFICULTY_MAP.
     Otherwise falls back to loading a single stage file.
 
@@ -1269,19 +1269,19 @@ STAGE_NAMES = {
 }
 
 # ── 3-Level Difficulty Curriculum ──────────────────────────────────
-# Maps difficulty level to underlying stage files.
-# "format"      → random 400 from all stages (learn XML + think blocks)
-# "reasoning"   → all 1,200 episodes (learn statutory math, flight risk, outcome)
-# "adversarial" → stage 3+4 only (bias reversal + schema drift)
+# Case-difficulty based: easy cases first → build confidence → harder cases.
+# "easy"   → Stage 1 only (landmark, clear-cut cases)
+# "medium" → Stage 2 only (contested, judgment calls)
+# "hard"   → Stages 3+4 (bias reversal + schema drift)
 DIFFICULTY_MAP = {
-    "format":      {"stages": [1, 2, 3, 4], "sample": 400, "steps": 80},
-    "reasoning":   {"stages": [1, 2, 3, 4], "sample": None, "steps": 140},  # all episodes
-    "adversarial": {"stages": [3, 4],        "sample": None, "steps": 80},
+    "easy":   {"stages": [1],    "sample": None, "steps": 60},   # 104 episodes
+    "medium": {"stages": [2],    "sample": None, "steps": 160},  # 761 episodes
+    "hard":   {"stages": [3, 4], "sample": None, "steps": 80},   # 335 episodes
 }
 DIFFICULTY_NAMES = {
-    "format":      "Format (learn XML structure + think blocks)",
-    "reasoning":   "Reasoning (statutory math, flight risk, outcome)",
-    "adversarial": "Adversarial (bias reversal + schema drift)",
+    "easy":   "Easy (landmark clear-cut cases, 104 episodes)",
+    "medium": "Medium (contested judgment calls, 761 episodes)",
+    "hard":   "Hard (bias reversal + schema drift, 335 episodes)",
 }
 
 STAGE_THRESHOLD = 0.60  # 60% outcome accuracy to unlock next stage
@@ -1393,7 +1393,7 @@ def train_curriculum(
 
     Supports two modes:
     1. 3-difficulty curriculum (default):
-       difficulties=["format", "reasoning", "adversarial"]
+       difficulties=["easy", "medium", "hard"]
        Steps per level come from DIFFICULTY_MAP.
 
     2. Legacy 4-stage curriculum:
@@ -1405,7 +1405,7 @@ def train_curriculum(
     """
     # Determine training mode
     if difficulties is None and stages is None:
-        difficulties = ["format", "reasoning", "adversarial"]
+        difficulties = ["easy", "medium", "hard"]
 
     use_difficulty_mode = difficulties is not None
     if use_difficulty_mode:
@@ -1487,7 +1487,7 @@ def train_curriculum(
             current_prompt = SYSTEM_PROMPT
 
         # ── Baseline eval ──
-        eval_stage = {"format": 1, "reasoning": 2, "adversarial": 3}.get(level, level)
+        eval_stage = {"easy": 1, "medium": 2, "hard": 3}.get(level, level)
         print(f"\n  Evaluating baseline (stage {eval_stage})...")
         baseline_reward, _ = evaluate_on_stage(
             model, tokenizer, episodes_dir, eval_stage, n_samples=12,
@@ -1693,7 +1693,7 @@ def train_curriculum(
         fig, ax = plt.subplots(figsize=(12, 5))
         fig.patch.set_facecolor("#0a0d1a")
         ax.set_facecolor("#0a0d1a")
-        colors = {"format": "#6366f1", "reasoning": "#14b8a6", "adversarial": "#f97316"}
+        colors = {"easy": "#6366f1", "medium": "#14b8a6", "hard": "#f97316"}
         global_step = 0
         for lv_key, lv_log in all_log_histories.items():
             steps = [e["step"] + global_step for e in lv_log if "reward" in e]
@@ -2182,10 +2182,10 @@ if __name__ == "__main__":
     parser.add_argument("--episode_quota", default="",
                         help="Comma-separated per-stage train cap for legacy --curriculum mode. "
                              "Pass empty string '' to use the full splits (default).")
-    parser.add_argument("--difficulties", default="format,reasoning,adversarial",
+    parser.add_argument("--difficulties", default="easy,medium,hard",
                         help="Comma-separated difficulty levels for 3-level curriculum. "
-                             "Options: format, reasoning, adversarial. "
-                             "Default: 'format,reasoning,adversarial'")
+                             "Options: easy, medium, hard. "
+                             "Default: 'easy,medium,hard'")
     parser.add_argument("--model_name", default="unsloth/Qwen2.5-7B-Instruct",
                         help="HuggingFace model name for training.")
 
