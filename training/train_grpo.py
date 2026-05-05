@@ -29,8 +29,12 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import urllib.request
-import unsloth
 import urllib.parse
+
+try:
+    import unsloth  # noqa: F401 — optional; loaded lazily inside training functions
+except ImportError:
+    pass  # Will be imported inside train_curriculum() / train() when needed
 
 try:
     import wandb
