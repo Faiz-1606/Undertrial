@@ -1274,9 +1274,9 @@ STAGE_NAMES = {
 # "medium" → Stage 2 only (contested, judgment calls)
 # "hard"   → Stages 3+4 (bias reversal + schema drift)
 DIFFICULTY_MAP = {
-    "easy":   {"stages": [1],    "sample": None, "steps": 60},   # 104 episodes
-    "medium": {"stages": [2],    "sample": None, "steps": 160},  # 761 episodes
-    "hard":   {"stages": [3, 4], "sample": None, "steps": 80},   # 335 episodes
+    "easy":   {"stages": [1],    "sample": None, "steps": 70},   # 104 episodes
+    "medium": {"stages": [2],    "sample": None, "steps": 180},  # 761 episodes
+    "hard":   {"stages": [3, 4], "sample": None, "steps": 90},   # 335 episodes
 }
 DIFFICULTY_NAMES = {
     "easy":   "Easy (landmark clear-cut cases, 104 episodes)",
@@ -1558,7 +1558,7 @@ def train_curriculum(
             gradient_accumulation_steps=grad_accum,
             num_train_epochs=1,
             max_steps=steps,
-            num_generations=6,             # 6 for 7B on T4 (was 4 for 1.5B)
+            num_generations=4,             # 4 for T4 15GB (6 OOMs)
             max_completion_length=max_completion_length,
             temperature=1.1,               # Higher exploration (was 0.85)
             beta=0.01,
