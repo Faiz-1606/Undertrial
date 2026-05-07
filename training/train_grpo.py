@@ -1379,10 +1379,10 @@ def train_curriculum(
     max_steps_per_stage: int = 150,
     batch_size: int = 1,   # T4-safe
     grad_accum: int = 8,   # Effective batch = 8
-    lr: float = 5e-6,
+    lr: float = 5e-5,
     threshold: float = STAGE_THRESHOLD,
     wandb_disabled: bool = False,
-    max_completion_length: int = 384,
+    max_completion_length: int = 640,
     episode_quota: Dict[int, int] = None,
     difficulties: List[str] = None,
     model_name: str = "unsloth/Qwen2.5-7B-Instruct",
@@ -1561,7 +1561,7 @@ def train_curriculum(
             num_generations=4,             # 4 for T4 15GB (6 OOMs)
             max_completion_length=max_completion_length,
             temperature=0.9,               # Balanced: coherent but diverse
-            beta=0.01,
+            beta=0.04,                     # Stronger reward signal for LoRA
             logging_steps=5,
             save_steps=50,
             report_to="wandb" if use_wandb else "none",
