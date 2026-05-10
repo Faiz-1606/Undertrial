@@ -1,6 +1,6 @@
 """
 UndertriAI — GRPO Training Script
-Fine-tunes Qwen2.5-1.5B-Instruct using Group Relative Policy Optimization
+Fine-tunes Qwen2.5-7B-Instruct using Group Relative Policy Optimization
 against the UndertriAI bail assessment environment.
 
 Run in Google Colab (T4 GPU recommended):
@@ -29,8 +29,12 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import urllib.request
-import unsloth
 import urllib.parse
+
+try:
+    import unsloth  # noqa: F401 — optional; loaded lazily inside training functions
+except ImportError:
+    pass  # Will be imported inside train_curriculum() / train() when needed
 
 try:
     import wandb
@@ -341,7 +345,9 @@ def reward_format_single(completion: str) -> float:
 
 
 def reward_outcome_match(completions: List[str], episode_batch: List[Dict], **kwargs) -> List[float]:
-    """40% weight: does the agent's recommendation match the HC decision?"""
+    """40% weight: does the agent's recommendation match the HC decision?
+    Fix 1b: Wrong direction returns -0.3 penalty (not 0.0).
+    """
     scores = []
     for comp, ep in zip(completions, episode_batch):
         parsed = parse_model_output(comp)
@@ -352,23 +358,30 @@ def reward_outcome_match(completions: List[str], episode_batch: List[Dict], **kw
             scores.append(0.0)
             continue
 
-        if ("grant" in agent_out and "grant" in gt_out) or \
-           ("den" in agent_out and "den" in gt_out):
-            scores.append(1.0)
+        agent_grant = "grant" in agent_out or "conditional" in agent_out
+        gt_grant    = "grant" in gt_out or "conditional" in gt_out
+
+        if agent_grant == gt_grant:
+            scores.append(1.0 if agent_out == gt_out else 0.8)
         else:
-            scores.append(0.0)
+            scores.append(-0.3)  # Fix 1b: active penalty for wrong direction
     return scores
 
 
 def reward_flight_risk(completions: List[str], episode_batch: List[Dict], **kwargs) -> List[float]:
-    """20% weight: flight risk classification vs implicit GT."""
+    """20% weight: flight risk classification vs implicit GT.
+    Fix 1a: Empty/unrecognized labels return 0.0 (not free Medium).
+    """
     scores = []
     for comp, ep in zip(completions, episode_batch):
         parsed    = parse_model_output(comp)
-        agent_fr  = parsed["flight_risk"].strip()
+        agent_fr  = parsed["flight_risk"].strip().capitalize() if parsed["flight_risk"] else ""
         gt_fr     = ep["ground_truth"].get("implicit_flight_risk", "Medium")
         risk_vals = {"Low": 0, "Medium": 1, "High": 2}
-        diff      = abs(risk_vals.get(agent_fr, 1) - risk_vals.get(gt_fr, 1))
+        if agent_fr not in risk_vals:
+            scores.append(0.0)  # Fix 1a: no free ride
+            continue
+        diff = abs(risk_vals[agent_fr] - risk_vals.get(gt_fr, 1))
         scores.append(1.0 if diff == 0 else (0.5 if diff == 1 else 0.0))
     return scores
 
@@ -622,15 +635,48 @@ def load_episodes(
     split: str = "train",
     val_fraction: float = 0.15,
     test_fraction: float = 0.10,
+    difficulty: str = None,
 ) -> List[Dict]:
     """
-    Load episodes for a given split (Gap 2: train/val/test split).
+    Load episodes for a given split.
+
+    If `difficulty` is provided ("easy", "medium", "hard"),
+    loads from the corresponding stage files per DIFFICULTY_MAP.
+    Otherwise falls back to loading a single stage file.
 
     Split fractions (applied deterministically by index, no shuffle):
         train  = first (1 - val - test) fraction
         val    = next val_fraction
         test   = last test_fraction
     """
+    # ── Difficulty-based loading ──
+    if difficulty and difficulty in DIFFICULTY_MAP:
+        dmap = DIFFICULTY_MAP[difficulty]
+        all_eps = []
+        for s in dmap["stages"]:
+            path = Path(episodes_dir) / f"episodes_stage_{s}.jsonl"
+            if path.exists():
+                with open(path, encoding="utf-8") as f:
+                    all_eps.extend([json.loads(l) for l in f if l.strip()])
+        if not all_eps:
+            # Fallback to episodes_all.jsonl
+            path = Path(episodes_dir) / "episodes_all.jsonl"
+            if path.exists():
+                with open(path, encoding="utf-8") as f:
+                    stage_set = set(dmap["stages"])
+                    all_eps = [json.loads(l) for l in f if l.strip()
+                               and json.loads(l).get("curriculum_stage", 1) in stage_set]
+        if not all_eps:
+            raise FileNotFoundError(f"No episodes found for difficulty={difficulty}")
+        # Apply sample cap if specified
+        if dmap["sample"] and len(all_eps) > dmap["sample"]:
+            random.shuffle(all_eps)
+            all_eps = all_eps[:dmap["sample"]]
+        else:
+            random.shuffle(all_eps)
+        return all_eps  # No train/val/test split for difficulty mode
+
+    # ── Legacy stage-based loading ──
     path = Path(episodes_dir) / f"episodes_stage_{stage}.jsonl"
     use_all_fallback = False
     if not path.exists():
@@ -819,7 +865,7 @@ def train(
 ):
     print("=" * 60)
     print("  UndertriAI — GRPO Training with Unsloth")
-    print(f"  Model: Qwen2.5-1.5B-Instruct | Stage: {stage}")
+    print(f"  Model: Qwen2.5-7B-Instruct | Stage: {stage}")
     print("=" * 60)
 
     # ── Change 1: Print mode ──
@@ -838,7 +884,7 @@ def train(
             "stage": stage,
             "env_url": env_url if not offline else "offline",
             "steps": max_steps,
-            "model": "Qwen2.5-1.5B",
+            "model": "Qwen2.5-7B",
             "reward_formula": "outcome + flight_risk + statutory + conditions + rq + format - bias + 0.05*process",
         },
         enabled=not wandb_disabled,
@@ -848,7 +894,7 @@ def train(
     from unsloth import FastLanguageModel  # type: ignore
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name   = "unsloth/Qwen2.5-1.5B-Instruct",
+        model_name   = "unsloth/Qwen2.5-7B-Instruct",
         max_seq_length = max_seq_len,
         load_in_4bit = True,
         fast_inference = False,
@@ -1171,14 +1217,14 @@ def save_comparison_plot(stage_results: Dict[int, Dict[str, float]], output_dir:
 
 def evaluate_baseline(episodes_dir: str, n_samples: int = 20):
     """
-    Quick evaluation of a zero-shot Qwen2.5-1.5B-Instruct on bail cases.
+    Quick evaluation of a zero-shot Qwen2.5-7B-Instruct on bail cases.
     Run this BEFORE training to get the baseline reward curve starting point.
     """
     print("\nEvaluating zero-shot baseline...")
     from unsloth import FastLanguageModel  # type: ignore
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name   = "unsloth/Qwen2.5-1.5B-Instruct",
+        model_name   = "unsloth/Qwen2.5-7B-Instruct",
         max_seq_length = 3072,
         load_in_4bit = True,
     )
@@ -1220,6 +1266,22 @@ STAGE_NAMES = {
     2: "Contested (judgment calls)",
     3: "Bias Reversal (parity cases)",
     4: "Schema Drift (IPC→BNSS)",
+}
+
+# ── 3-Level Difficulty Curriculum ──────────────────────────────────
+# Case-difficulty based: easy cases first → build confidence → harder cases.
+# "easy"   → Stage 1 only (landmark, clear-cut cases)
+# "medium" → Stage 2 only (contested, judgment calls)
+# "hard"   → Stages 3+4 (bias reversal + schema drift)
+DIFFICULTY_MAP = {
+    "easy":   {"stages": [1],    "sample": None, "steps": 70},   # 104 episodes
+    "medium": {"stages": [2],    "sample": None, "steps": 180},  # 761 episodes
+    "hard":   {"stages": [3, 4], "sample": None, "steps": 90},   # 335 episodes
+}
+DIFFICULTY_NAMES = {
+    "easy":   "Easy (landmark clear-cut cases, 104 episodes)",
+    "medium": "Medium (contested judgment calls, 761 episodes)",
+    "hard":   "Hard (bias reversal + schema drift, 335 episodes)",
 }
 
 STAGE_THRESHOLD = 0.60  # 60% outcome accuracy to unlock next stage
@@ -1315,39 +1377,71 @@ def train_curriculum(
     output_dir: str = "./output/undertrial_grpo",
     stages: List[int] = None,
     max_steps_per_stage: int = 150,
-    batch_size: int = 1,   # M4: T4-safe (was 4 — OOMs with 3B + 4 rollouts)
-    grad_accum: int = 8,   # M4: compensate to keep effective batch ~8
-    lr: float = 5e-6,
+    batch_size: int = 1,   # T4-safe
+    grad_accum: int = 8,   # Effective batch = 8
+    lr: float = 5e-5,
     threshold: float = STAGE_THRESHOLD,
     wandb_disabled: bool = False,
-    max_completion_length: int = 512,
+    max_completion_length: int = 640,
     episode_quota: Dict[int, int] = None,
+    difficulties: List[str] = None,
+    model_name: str = "unsloth/Qwen2.5-7B-Instruct",
+    env_url: str = None,
 ):
     """
     Self-improving curriculum training.
 
-    The agent trains on stage N, then its best reasoning traces are
-    harvested and injected as few-shot examples into stage N+1's prompt.
-    Stage N+1 is only unlocked when stage N accuracy exceeds the threshold.
+    Supports two modes:
+    1. 3-difficulty curriculum (default):
+       difficulties=["easy", "medium", "hard"]
+       Steps per level come from DIFFICULTY_MAP.
 
-    This is the key self-improvement mechanism for Theme 4.
+    2. Legacy 4-stage curriculum:
+       stages=[1, 2, 3, 4]
+       Uses max_steps_per_stage for each.
+
+    When env_url is provided, rewards are computed via the live environment
+    API (online mode). Otherwise, rewards are computed in-process (offline).
     """
-    if stages is None:
-        stages = [1, 2, 3, 4]
+    # Determine training mode
+    if difficulties is None and stages is None:
+        difficulties = ["easy", "medium", "hard"]
 
+    use_difficulty_mode = difficulties is not None
+    if use_difficulty_mode:
+        levels = difficulties
+        level_names = {d: DIFFICULTY_NAMES.get(d, d) for d in difficulties}
+        level_steps = {d: DIFFICULTY_MAP[d]["steps"] for d in difficulties}
+    else:
+        levels = stages
+        level_names = {s: STAGE_NAMES.get(s, f"Stage {s}") for s in levels}
+        level_steps = {s: max_steps_per_stage for s in levels}
+
+    total_steps = sum(level_steps.values())
+    online_mode = env_url is not None
     print("=" * 60)
     print("  UndertriAI — Self-Improving Curriculum Training")
-    print(f"  Stages: {stages} | Threshold: {threshold:.0%}")
+    if online_mode:
+        print(f"  Mode: ONLINE (env_url={env_url})")
+    else:
+        print(f"  Mode: OFFLINE (in-process reward)")
+    if use_difficulty_mode:
+        for d in levels:
+            ep_count = DIFFICULTY_MAP[d].get("sample", "all")
+            print(f"    {d}: {level_steps[d]} steps, {ep_count} episodes")
+    else:
+        print(f"  Stages: {levels} | Threshold: {threshold:.0%}")
+    print(f"  Total steps: {total_steps} | Model: {model_name}")
     print("=" * 60)
 
     use_wandb = setup_wandb(
         project="undertri-bail-rl",
         run_name=f"grpo-curriculum-{datetime.now().strftime('%Y%m%d-%H%M')}",
         config={
-            "mode": "curriculum",
-            "stages": stages,
-            "steps_per_stage": max_steps_per_stage,
-            "model": "Qwen2.5-1.5B",
+            "mode": "difficulty" if use_difficulty_mode else "curriculum",
+            "levels": [str(l) for l in levels],
+            "total_steps": total_steps,
+            "model": model_name,
             "threshold": threshold,
         },
         enabled=not wandb_disabled,
@@ -1356,10 +1450,10 @@ def train_curriculum(
     from unsloth import FastLanguageModel  # type: ignore
     from trl import GRPOConfig, GRPOTrainer  # type: ignore
 
-    # Load model once — reused across all stages
+    # Load model once — reused across all levels
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen2.5-1.5B-Instruct",
-        max_seq_length=3072,
+        model_name=model_name,
+        max_seq_length=2048,
         load_in_4bit=True,
         fast_inference=False,
     )
@@ -1373,41 +1467,49 @@ def train_curriculum(
     )
 
     accumulated_traces: List[str] = []
-    stage_results = {}
+    level_results = {}
+    all_log_histories = {}
     current_prompt = SYSTEM_PROMPT
 
-    for stage in stages:
+    for level in levels:
+        level_name = level_names[level]
+        steps = level_steps[level]
         print(f"\n{'━' * 60}")
-        print(f"  STAGE {stage}: {STAGE_NAMES.get(stage, '?')}")
+        print(f"  LEVEL: {level_name}")
+        print(f"  Steps: {steps}")
         print(f"{'━' * 60}")
 
-        # ── Inject traces from previous stages into prompt ──
+        # ── Inject traces from previous levels into prompt ──
         if accumulated_traces:
             current_prompt = inject_examples(SYSTEM_PROMPT, accumulated_traces)
-            print(f"  Injected {len(accumulated_traces)} successful traces from earlier stages")
+            print(f"  Injected {len(accumulated_traces)} successful traces from earlier levels")
         else:
             current_prompt = SYSTEM_PROMPT
 
-        # ── Baseline eval for this stage ──
-        print(f"\n  Evaluating baseline on Stage {stage}...")
+        # ── Baseline eval ──
+        eval_stage = {"easy": 1, "medium": 2, "hard": 3}.get(level, level)
+        print(f"\n  Evaluating baseline (stage {eval_stage})...")
         baseline_reward, _ = evaluate_on_stage(
-            model, tokenizer, episodes_dir, stage, n_samples=12,
+            model, tokenizer, episodes_dir, eval_stage, n_samples=12,
             max_new_tokens=max_completion_length,
         )
-        print(f"  Stage {stage} baseline: {baseline_reward:.4f}")
+        print(f"  Baseline: {baseline_reward:.4f}")
 
-        # ── Build dataset for this stage ──
-        episodes = load_episodes(episodes_dir, stage=stage, split="train")
+        # ── Build dataset ──
+        if use_difficulty_mode:
+            episodes = load_episodes(episodes_dir, difficulty=level)
+        else:
+            episodes = load_episodes(episodes_dir, stage=level, split="train")
         if not episodes:
-            print(f"  ⚠ No episodes for stage {stage} — skipping")
+            print(f"  ⚠ No episodes for {level_name} — skipping")
             continue
 
-        # Demo-mode: cap episodes per stage if quota was provided
-        if episode_quota and stage in episode_quota:
-            quota_n = episode_quota[stage]
+        # Demo-mode: cap episodes per stage if quota was provided (legacy mode only)
+        if not use_difficulty_mode and episode_quota and level in episode_quota:
+            quota_n = episode_quota[level]
             if quota_n and quota_n < len(episodes):
                 episodes = episodes[:quota_n]
-                print(f"  [DEMO] Capped Stage {stage} to {quota_n} episodes (--episode_quota)")
+                print(f"  [DEMO] Capped to {quota_n} episodes (--episode_quota)")
 
         print(f"  Training on {len(episodes)} episodes...")
 
@@ -1430,38 +1532,43 @@ def train_curriculum(
             })
         dataset = Dataset.from_list(rows)
 
-        # Fix 1.4: capture stage value to avoid closure-over-loop-variable bug
-        _stage_for_closure = stage
-        # Fix 1.3: expand episode list if TRL doesn't repeat for num_generations
+        # Capture level for closure to avoid closure-over-loop-variable bug
+        _stage_for_closure = eval_stage
+        _env_url_for_closure = env_url
         def reward_fn(completions: List[str], episode: List[str] = None, **kwargs) -> List[float]:
             ep_raw = episode or kwargs.get("episode", [])
             ep_objs = [json.loads(e) if isinstance(e, str) else e for e in ep_raw]
             if ep_objs and len(ep_objs) < len(completions):
                 n_gen = len(completions) // len(ep_objs)
                 ep_objs = [ep for ep in ep_objs for _ in range(n_gen)]
-            return combined_reward(completions, ep_objs[:len(completions)], current_stage=_stage_for_closure)
+            ep_objs = ep_objs[:len(completions)]
+            if _env_url_for_closure:
+                # Online: route each completion through the live env API
+                return [rollout_via_env_api(c, e, env_url=_env_url_for_closure)
+                        for c, e in zip(completions, ep_objs)]
+            else:
+                # Offline: in-process scoring
+                return combined_reward(completions, ep_objs, current_stage=_stage_for_closure)
 
-        stage_output = f"{output_dir}/stage_{stage}"
+        level_output = f"{output_dir}/level_{level}" if use_difficulty_mode else f"{output_dir}/stage_{level}"
         config = GRPOConfig(
-            output_dir=stage_output,
+            output_dir=level_output,
             learning_rate=lr,
             per_device_train_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
             num_train_epochs=1,
-            max_steps=max_steps_per_stage,
-            num_generations=4,            # M4: T4-safe (was 6)
+            max_steps=steps,
+            num_generations=4,             # 4 for T4 15GB (6 OOMs)
             max_completion_length=max_completion_length,
-            temperature=0.85,             # Better rollout diversity
-            beta=0.01,
+            temperature=0.9,               # Balanced: coherent but diverse
+            beta=0.04,                     # Stronger reward signal for LoRA
             logging_steps=5,
             save_steps=50,
             report_to="wandb" if use_wandb else "none",
             remove_unused_columns=False,
         )
 
-        # ── Switch model back to training mode before trainer.train() ──
-        # evaluate_on_stage calls FastLanguageModel.for_inference(model);
-        # without this reset, stages 2-4 train in inference mode silently.
+        # Switch model back to training mode before trainer.train()
         FastLanguageModel.for_training(model)
 
         trainer = GRPOTrainer(
@@ -1473,103 +1580,58 @@ def train_curriculum(
         )
         trainer.train()
 
+        # Save log history for combined plot later
+        all_log_histories[str(level)] = trainer.state.log_history
+
         # ── Post-training eval ──
-        print(f"\n  Evaluating after Stage {stage} training...")
+        print(f"\n  Evaluating after {level_name} training...")
         post_reward, eval_results = evaluate_on_stage(
-            model, tokenizer, episodes_dir, stage, n_samples=12,
+            model, tokenizer, episodes_dir, eval_stage, n_samples=12,
             max_new_tokens=max_completion_length,
         )
         improvement = post_reward - baseline_reward
-        print(f"  Stage {stage}: {baseline_reward:.4f} → {post_reward:.4f} "
+        print(f"  {level_name}: {baseline_reward:.4f} → {post_reward:.4f} "
               f"(Δ = {improvement:+.4f})")
 
-        stage_results[stage] = {
+        level_results[str(level)] = {
             "baseline": round(baseline_reward, 4),
             "post": round(post_reward, 4),
             "delta": round(improvement, 4),
         }
 
-        # ── Harvest good traces for next stage ──
+        # ── Harvest good traces for next level ──
         new_traces = extract_good_traces(eval_results, min_reward=0.6, top_k=2)
         if new_traces:
             accumulated_traces.extend(new_traces)
-            print(f"  ✓ Harvested {len(new_traces)} good traces for next stage")
+            print(f"  ✓ Harvested {len(new_traces)} good traces for next level")
 
-        # ── Check threshold for stage progression ──
+        # ── Check threshold for level progression ──
         if post_reward >= threshold:
-            print(f"  ✓ Stage {stage} PASSED (reward {post_reward:.2f} ≥ {threshold:.2f})")
-            if stage < max(stages):
-                print(f"  → Unlocking Stage {stage + 1}")
+            print(f"  ✓ {level_name} PASSED (reward {post_reward:.2f} ≥ {threshold:.2f})")
         else:
-            print(f"  ✗ Stage {stage} below threshold ({post_reward:.2f} < {threshold:.2f})")
-            print(f"  → Continuing to next stage anyway (curriculum mode)")
+            print(f"  ✗ {level_name} below threshold ({post_reward:.2f} < {threshold:.2f})")
+            print(f"  → Continuing to next level anyway (curriculum mode)")
 
-        # ── [SELF-IMPROVEMENT] Theme 4: Synthetic case generation on mastery ──
-        # When the agent masters a stage (reward ≥ 0.70), generate harder
-        # synthetic variants from real episodes and inject them into the NEXT
-        # stage's training set. This is genuine self-directed curriculum growth:
-        # the agent's own performance triggers the creation of new challenges.
-        _MASTERY_LEVEL = 0.70
-        if post_reward >= _MASTERY_LEVEL and stage < max(stages):
-            next_stage = stage + 1
-            try:
-                import sys as _sys
-                from pathlib import Path as _Path
-                _sys.path.insert(0, str(_Path(__file__).parent.parent))
-                from server.case_generator import generate_variants  # type: ignore
-                # Use test-split episodes as source (not training data — no leakage)
-                src_episodes = load_episodes(episodes_dir, stage=stage, split="test")
-                syn_cases: List[Dict] = []
-                for src_ep in src_episodes[:5]:  # cap at 5 source episodes
-                    variants = generate_variants(src_ep, n=2)
-                    for v in variants:
-                        v["curriculum_stage"] = next_stage  # route to next stage pool
-                    syn_cases.extend(variants)
-                if syn_cases:
-                    prev_count = len(_synthetic_episode_pool.get(next_stage, []))
-                    _synthetic_episode_pool.setdefault(next_stage, []).extend(syn_cases)
-                    print(
-                        f"\n  [SELF-IMPROVEMENT] Stage {stage} MASTERY ✓ "
-                        f"(reward={post_reward:.2f} ≥ {_MASTERY_LEVEL})"
-                    )
-                    print(
-                        f"  [SELF-IMPROVEMENT] Generated {len(syn_cases)} synthetic harder cases "
-                        f"for Stage {next_stage} "
-                        f"(pool: {prev_count} → {len(_synthetic_episode_pool[next_stage])} cases)"
-                    )
-                    perturbation_types = {v.get("perturbation_type", "?") for v in syn_cases}
-                    print(f"  [SELF-IMPROVEMENT] Perturbation types: {perturbation_types}")
-                    print(
-                        f"  [SELF-IMPROVEMENT] Stage {next_stage} will train on "
-                        f"{len(load_episodes(episodes_dir, stage=next_stage, split='train'))} episodes "
-                        f"(real + synthetic)."
-                    )
-            except Exception as syn_err:
-                print(f"  [SELF-IMPROVEMENT] Synthetic generation skipped ({type(syn_err).__name__}: {syn_err})")
+        # Save LoRA adapters checkpoint
+        model.save_pretrained(level_output)
+        tokenizer.save_pretrained(level_output)
+        print(f"  Checkpoint saved (adapters): {level_output}")
 
-        # Save LoRA adapters — Unsloth saves only adapter weights by default.
-        # Do NOT pass save_adapters_only=True — not a valid PEFT/Unsloth kwarg.
-        model.save_pretrained(stage_output)
-        tokenizer.save_pretrained(stage_output)
-        print(f"  Checkpoint saved (adapters): {stage_output}")
-
-        # ── Per-stage artefacts: reward curve + incremental results JSON ──
-        # Saved inside the loop so partial curricula (e.g. timeout after Stage 1)
-        # still leave behind a usable plot and a results file for the judges.
+        # ── Per-level artefacts: reward curve + incremental results JSON ──
         try:
-            save_training_plots(trainer.state.log_history, stage_output)
+            save_training_plots(trainer.state.log_history, level_output)
         except Exception as plot_err:
-            print(f"  [WARNING] Could not save Stage {stage} plot ({type(plot_err).__name__}: {plot_err})")
+            print(f"  [WARNING] Could not save {level_name} plot ({type(plot_err).__name__}: {plot_err})")
 
         try:
             partial_path = Path(output_dir) / "curriculum_results.json"
             partial_path.parent.mkdir(parents=True, exist_ok=True)
             partial_path.write_text(json.dumps({
-                "stages": stage_results,
+                "levels": level_results,
                 "traces_harvested": len(accumulated_traces),
                 "threshold": threshold,
-                "completed_stages": list(stage_results.keys()),
-                "in_progress": False,
+                "completed_levels": list(level_results.keys()),
+                "mode": "difficulty" if use_difficulty_mode else "stage",
             }, indent=2))
             print(f"  Incremental results saved: {partial_path}")
         except Exception as json_err:
@@ -1579,13 +1641,14 @@ def train_curriculum(
     print(f"\n{'═' * 60}")
     print("  CURRICULUM TRAINING COMPLETE")
     print(f"{'═' * 60}")
-    for s, r in stage_results.items():
+    for lv, r in level_results.items():
         status = "✓" if r["post"] >= threshold else "✗"
-        print(f"  {status} Stage {s}: {r['baseline']:.4f} → {r['post']:.4f} "
+        label = level_names.get(lv, lv) if use_difficulty_mode else f"Stage {lv}"
+        print(f"  {status} {label}: {r['baseline']:.4f} → {r['post']:.4f} "
               f"(Δ = {r['delta']:+.4f})")
     print(f"  Total traces harvested: {len(accumulated_traces)}")
 
-    # Save final model (adapters only — merge separately if needed)
+    # Save final model (adapters only)
     final_dir = f"{output_dir}/final"
     model.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
@@ -1595,26 +1658,95 @@ def train_curriculum(
     results_path = Path(output_dir) / "curriculum_results.json"
     results_path.parent.mkdir(parents=True, exist_ok=True)
     results_path.write_text(json.dumps({
-        "stages": stage_results,
+        "levels": level_results,
         "traces_harvested": len(accumulated_traces),
         "threshold": threshold,
+        "mode": "difficulty" if use_difficulty_mode else "stage",
     }, indent=2))
     print(f"  Results saved: {results_path}")
 
-    # Save training plots (C6) — use last trainer's log
-    try:
-        save_training_plots(trainer.state.log_history, output_dir)
-    except Exception:
-        print("  [WARNING] Could not save training plots.")
+    # ── Save ALL per-level plots to root output dir for easy access ──
+    # (Per-level plots were also saved inside the loop to level_output dirs)
+    root_plots = Path(output_dir) / "plots"
+    root_plots.mkdir(parents=True, exist_ok=True)
 
-    # Save baseline-vs-trained comparison plot (one bar pair per stage)
+    for lv_key, lv_log in all_log_histories.items():
+        try:
+            save_training_plots(lv_log, str(root_plots / lv_key))
+            # Also copy reward curve directly to root plots dir with level prefix
+            src = root_plots / lv_key / "plots" / "reward_curve.png"
+            dst = root_plots / f"reward_curve_{lv_key}.png"
+            if src.exists():
+                import shutil
+                shutil.copy2(str(src), str(dst))
+                print(f"  Plot saved: {dst}")
+        except Exception as e:
+            print(f"  [WARNING] Could not save {lv_key} plot ({type(e).__name__}: {e})")
+
+    # Save combined all-levels reward curve
     try:
-        save_comparison_plot(stage_results, output_dir)
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+        fig.patch.set_facecolor("#0a0d1a")
+        ax.set_facecolor("#0a0d1a")
+        colors = {"easy": "#6366f1", "medium": "#14b8a6", "hard": "#f97316"}
+        global_step = 0
+        for lv_key, lv_log in all_log_histories.items():
+            steps = [e["step"] + global_step for e in lv_log if "reward" in e]
+            rewards = [e["reward"] for e in lv_log if "reward" in e]
+            if steps:
+                color = colors.get(lv_key, "#94a3b8")
+                ax.plot(steps, rewards, color=color, linewidth=1, alpha=0.4)
+                if len(rewards) > 5:
+                    smooth = np.convolve(rewards, np.ones(5) / 5, mode="valid")
+                    ax.plot(steps[2:-2], smooth, color=color, linewidth=2.5, label=lv_key)
+                else:
+                    ax.plot(steps, rewards, color=color, linewidth=2.5, label=lv_key)
+                global_step = max(steps) if steps else global_step
+        ax.set_xlabel("Training Step", color="#94a3b8")
+        ax.set_ylabel("Reward", color="#94a3b8")
+        ax.set_title("UndertriAI — All Levels Reward Curve", color="#e2e8f0", pad=12)
+        ax.tick_params(colors="#94a3b8")
+        ax.grid(True, alpha=0.2)
+        ax.legend(facecolor="#111827", edgecolor="#1e2d45", labelcolor="#94a3b8")
+        for spine in ax.spines.values():
+            spine.set_color("#1e2d45")
+        fig.tight_layout()
+        combined_path = root_plots / "reward_curve_all_levels.png"
+        fig.savefig(str(combined_path), dpi=150, bbox_inches="tight", facecolor="#0a0d1a")
+        plt.close(fig)
+        print(f"  Combined plot saved: {combined_path}")
+    except Exception as e:
+        print(f"  [WARNING] Could not save combined plot ({type(e).__name__}: {e})")
+
+    # Save baseline-vs-trained comparison plot
+    try:
+        save_comparison_plot(level_results, output_dir)
     except Exception as cmp_err:
         print(f"  [WARNING] Could not save comparison plot ({type(cmp_err).__name__}: {cmp_err})")
 
+    # Copy all plots to /kaggle/working/ if running on Kaggle (persistent storage)
+    try:
+        kaggle_out = Path("/kaggle/working/undertrial_plots")
+        if Path("/kaggle/working").exists():
+            import shutil
+            if kaggle_out.exists():
+                shutil.rmtree(str(kaggle_out))
+            shutil.copytree(str(root_plots), str(kaggle_out))
+            # Also copy comparison plot
+            cmp_src = Path(output_dir) / "plots" / "before_after_comparison.png"
+            if cmp_src.exists():
+                shutil.copy2(str(cmp_src), str(kaggle_out / "before_after_comparison.png"))
+            print(f"  ✅ All plots copied to {kaggle_out} (Kaggle persistent)")
+    except Exception:
+        pass  # Not on Kaggle — skip silently
+
     finish_wandb()
-    return stage_results
+    return level_results
 
 
 # ============================================================
@@ -1672,7 +1804,7 @@ def train_adaptive(
 
     # Load model once
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen2.5-1.5B-Instruct",
+        model_name="unsloth/Qwen2.5-7B-Instruct",
         max_seq_length=3072,
         load_in_4bit=True,
         fast_inference=False,
@@ -2025,7 +2157,7 @@ if __name__ == "__main__":
     parser.add_argument("--output",       default="./output/undertrial_grpo")
     parser.add_argument("--stage",        type=int, default=1)
     parser.add_argument("--steps",        type=int, default=30,
-                        help="Per-stage training steps. Default 30 with the 1.5B base "
+                        help="Per-stage training steps. Default 30 with the 7B base "
                              "model fits a 4-stage curriculum into ~1h 50m on A10G-large "
                              "(well under a 3h budget; leaves margin for unexpected slowdowns).")
     parser.add_argument("--batch_size",   type=int, default=1)   # M4: T4-safe (was 4)
@@ -2044,17 +2176,18 @@ if __name__ == "__main__":
                         help="Use offline local scoring (no env server needed)")
     parser.add_argument("--wandb_disabled", action="store_true",
                         help="Disable WandB logging")
-    parser.add_argument("--max_completion_length", type=int, default=728,
-                        help="Max completion (and eval generation) tokens per rollout. "
-                             "728 prevents the reasoning-truncation that hurts rewards at "
-                             "512 tokens. Affordable here because the 1.5B base model is "
-                             "~1.8x faster per step than the original 3B.")
-    parser.add_argument("--episode_quota", default="30,30,30,30",
-                        help="Comma-separated per-stage train cap for --curriculum mode "
-                             "(e.g. '30,30,30,30' = 120 cases total, balanced across "
-                             "stages 1-4). Each stage's pool is read from its own "
-                             "episodes_stage_N.jsonl, so the curriculum ordering is "
-                             "preserved. Pass empty string '' to use the full splits.")
+    parser.add_argument("--max_completion_length", type=int, default=640,
+                        help="Max completion tokens per rollout. 640 for 7B on T4 "
+                             "(enough for full XML memo output).")
+    parser.add_argument("--episode_quota", default="",
+                        help="Comma-separated per-stage train cap for legacy --curriculum mode. "
+                             "Pass empty string '' to use the full splits (default).")
+    parser.add_argument("--difficulties", default="easy,medium,hard",
+                        help="Comma-separated difficulty levels for 3-level curriculum. "
+                             "Options: easy, medium, hard. "
+                             "Default: 'easy,medium,hard'")
+    parser.add_argument("--model_name", default="unsloth/Qwen2.5-7B-Instruct",
+                        help="HuggingFace model name for training.")
 
     args = parser.parse_args()
 
@@ -2071,8 +2204,11 @@ if __name__ == "__main__":
                 f"(got {args.episode_quota!r})"
             )
 
-    # Change 1: Validate env_url requirement
-    if not args.offline and not args.baseline_only and args.env_url is None:
+    # Parse difficulties
+    parsed_difficulties = [d.strip() for d in args.difficulties.split(",") if d.strip()]
+
+    # Validate env_url requirement (only for non-curriculum single-stage online mode)
+    if not args.offline and not args.baseline_only and not args.curriculum and args.env_url is None:
         parser.error(
             "env_url is required. Pass --env_url https://your-space.hf.space "
             "or use --offline for local testing."
@@ -2090,6 +2226,9 @@ if __name__ == "__main__":
             wandb_disabled=args.wandb_disabled,
             max_completion_length=args.max_completion_length,
             episode_quota=parsed_quota or None,
+            difficulties=parsed_difficulties,
+            model_name=args.model_name,
+            env_url=args.env_url,  # None = offline, URL = online
         )
     elif args.adaptive:
         if args.env_url is None:

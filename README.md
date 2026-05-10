@@ -27,7 +27,7 @@ tags:
 [![License: MIT](https://img.shields.io/badge/License-MIT-gray)](LICENSE)
 
 > **[▶ Try the Live Demo](https://huggingface.co/spaces/Draken1606/undertrial-ai)** — click "Run Bail Assessment" to see the environment in action.  
-> **[📝 Read the Story](BLOG_LINK_HERE)** — *"Three minutes should never decide a life"* (link to be updated)
+> **[📝 Read the Story](Blog.md)** — *"Three minutes should never decide a life"* (also on the [Space copy](https://huggingface.co/spaces/Draken1606/undertrial-ai/blob/main/Blog.md)).
 
 ---
 
@@ -224,7 +224,7 @@ GRPO correctly ranks `ideal > filler > minimal > spam`.
 
 ## Training
 
-Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-1.5B-Instruct` (4-bit quantized + LoRA r=16 — i.e. **QLoRA**).
+Uses **GRPO** (Group Relative Policy Optimization) via TRL + Unsloth on `Qwen2.5-7B-Instruct` (4-bit quantized + LoRA r=16 — i.e. **QLoRA**).
 
 ### Hybrid Training / Evaluation Design
 
@@ -245,23 +245,33 @@ The alternative — pure online training via `rollout_via_env_api()` for every r
 
 | Mode | Command | Description |
 |---|---|---|
-| **Curriculum** *(recommended)* | `python training/train_grpo.py --curriculum --env_url https://your-space.hf.space` | Sequential 4-stage with trace harvesting + per-stage before/after evals |
-| Adaptive | `python training/train_grpo.py --adaptive --env_url https://your-space.hf.space --steps 50` | **Theme 4** — self-directed with auto-promotion |
+| **3-level curriculum** *(default)* | `python training/train_grpo.py --curriculum` | Easy → medium → hard (`--difficulties easy,medium,hard`); omit `--env_url` for in-process rewards, or pass `--env_url https://your-space.hf.space` for live env-API scoring |
+| **Legacy 4-stage** | Call `train_curriculum(..., difficulties=None, stages=[1, 2, 3, 4], ...)` from Python (see notebook) | Sequential curriculum stages 1–4; per-stage step count comes from `--steps` (default 30). Optional `--episode_quota` caps episodes per stage |
+| **Adaptive** | `python training/train_grpo.py --adaptive --env_url https://your-space.hf.space --steps 50` | **Theme 4** — self-directed with auto-promotion |
 | Single-stage (env-API) | `python training/train_grpo.py --stage 1 --env_url https://your-space.hf.space --steps 200` | Score every rollout via live env API |
 | Single-stage (offline) | `python training/train_grpo.py --stage 1 --offline --steps 200` | Local scoring (smoke testing) |
 | Baseline only | `python training/train_grpo.py --baseline_only` | Zero-shot eval, no training |
 
-### Default hyperparameters (curriculum mode)
+### 3-Level Difficulty Curriculum
+
+| Level | Case type | Episodes (approx.) | Steps | Role |
+|-------|-----------|-------------------|-------|------|
+| **Easy** | Landmark clear-cut | 104 | 70 | Tool sequencing and format |
+| **Medium** | Contested judgment calls | 761 | 180 | Statutory math and risk assessment |
+| **Hard** | Bias reversal + schema drift | 335 | 90 | Parity and adaptability |
+
+### Default hyperparameters (`train_curriculum`)
 
 | Parameter | Default | Rationale |
 |---|---|---|
-| Base model | `unsloth/Qwen2.5-1.5B-Instruct` | 4-bit + LoRA r=16; ~30M trainable params |
-| Steps per stage | 30 | Fits 4-stage curriculum into ~1h 50m on A10G |
-| Episode quota | `30,30,30,30` (= 120 cases) | Balanced sample across difficulty buckets |
-| Max completion length | 728 tokens | Prevents reasoning truncation that hurts rewards at 512 |
-| `num_generations` | 4 | GRPO rollouts per prompt |
+| Base model | `unsloth/Qwen2.5-7B-Instruct` | 4-bit + LoRA r=16 |
+| Total steps (3-level) | 340 (70 + 180 + 90) | From `DIFFICULTY_MAP` in `training/train_grpo.py` |
+| `--steps` | 30 | Used for **legacy** 4-stage mode (`stages=[1,2,3,4]`) as steps per stage; ignored for fixed 3-level step counts |
+| `num_generations` | 4 | GRPO rollouts per prompt (`GRPOConfig` inside `train_curriculum`) |
+| `temperature` | 0.9 | Balanced diversity vs coherence in curriculum trainer |
+| Max completion length | 640 (`--max_completion_length`) | Enough for full XML memo on 7B / T4-class GPUs |
 | `batch_size × grad_accum` | 1 × 8 | Effective batch 8; T4/A10G safe |
-| `learning_rate` | 5e-6 | Curriculum-scale LR |
+| `learning_rate` | 5e-5 | `train_curriculum` default `lr` (single-stage `train()` uses 5e-6) |
 
 ### Deploy & Train Workflow
 
@@ -527,19 +537,25 @@ Due to compute and time constraints during the hackathon, we conducted **limited
 | **Mean (all stages)** | **0.4410** | **0.4898** | **+0.0488** *(+11% relative)* |
 | Traces harvested into Stage N+1 prompts (Theme 4) | — | 8 | — |
 
+![Baseline vs trained reward per curriculum stage](assets/results/before_after_comparison.png)
+
+*Headline figure — baseline vs trained reward per curriculum stage. Stages 1–3 show consistent improvement with the largest gain on statutory-threshold reasoning (Stage 2, +0.084). Stage 4 (perturbations) is essentially flat — the open problem.*
+
 **Reading the table.** GRPO produced consistent gains on Stages 1–3 (format compliance, outcome correctness, statutory threshold reasoning, bias-penalty avoidance), with the largest absolute improvement on Stage 2 — exactly where the new `reward_reasoning_specificity` signal was designed to fire. Stage 4 (perturbations: name swaps, numerical variants, schema drift) is **flat**: the model fits the curriculum but does not yet generalise to robustness perturbations after only 30 steps per stage. We treat this as the headline open problem (see Limitations & Future Work).
 
-**Reconstructed plots** (saved to `outputs/undertrial_grpo/plots/`):
+![Reward curve across all four curriculum stages](assets/results/reward_curve.png)
 
-- `before_after_comparison.png` — **headline figure**: 4-bar baseline vs trained per stage
-- `reward_curve.png` — multi-stage rollout trajectory with per-stage baseline / post-train bands
-- `training_loss.png` — KL-dominated GRPO loss across all 120 cumulative steps
+*Multi-stage reward trajectory (cumulative steps 5 → 120). Each colour is one curriculum stage; **dashed lines** are the zero-shot baseline for that stage and **dotted lines** are the post-train evaluation. Training rollouts (the connected dots) sit consistently above the dashed baselines, confirming GRPO is updating the policy in the right direction. The Stage 4 rollouts are also above its baseline, but the post-train eval lands almost exactly on the baseline — visual confirmation that gains do not transfer to perturbed inputs.*
 
-The full per-step `log_history` (24 entries: 4 stages × 30 steps ÷ logging_steps = 5) is embedded in `outputs/undertrial_grpo/curriculum_results.json` for independent verification. Plots and JSON were rebuilt from the captured `hf jobs logs` stdout via `training/parse_job_log.py` — the artifacts inside the HF Jobs container did not survive the ephemeral filesystem teardown, but every metric we needed was already in the log.
+![GRPO training loss across all 120 cumulative steps](assets/results/training_loss.png)
+
+*Training loss (note y-axis: ×10⁻⁶). In GRPO this curve is typically dominated by the KL-regularisation term in `GRPOConfig`; the primary learning signal is the reward, not the loss. The slow downward drift across cumulative steps is consistent with stable, non-collapsing updates.*
+
+**Reconstructed from log.** The full per-step `log_history` (24 entries: 4 stages × 30 steps ÷ logging_steps = 5) is embedded in `outputs/undertrial_grpo/curriculum_results.json` for independent verification. Canonical figures live in [`assets/results/`](assets/results/); they can be rebuilt from captured `hf jobs logs` stdout via [`training/parse_job_log.py`](training/parse_job_log.py) if job-local `outputs/` artifacts did not survive the ephemeral HF Jobs filesystem.
 
 **Methodology note (honest framing).** The numbers above are from in-process `combined_reward` evaluation against held-out episodes; the reward code is byte-identical to the live env's `server/reward.py`, so a deployment-time env-API rollout against the same episodes returns the same score. The `--env_url` plumbing is wired through `train_grpo.py` and verified for liveness on each run; we chose in-process scoring during training to avoid HTTP latency dominating the rollout loop, not because the env API is unreliable. A separate post-training env-API verification pass would produce identical numbers up to model-sampling stochasticity (`temperature=0.85`).
 
-**Note on limited training.** These results represent a single 30-steps-per-stage validation run on Qwen2.5-1.5B-Instruct under a 3-hour wall budget. With longer training, larger base models (3B / 7B), and richer perturbation curricula, we expect Stage 4 to also show meaningful gains and absolute mean reward to exceed 0.70+. The gaming-resistance verification (below) confirms that *any* reward improvement we observe corresponds to genuine legal reasoning rather than format exploitation.
+**Note on limited training.** These results represent a single legacy four-stage run (30 steps per stage) on **Qwen2.5-1.5B-Instruct** under a ~3-hour wall budget. The default trainer in this repo is **Qwen2.5-7B-Instruct** with a **3-level** difficulty curriculum (see [Training](#training)); longer runs and richer perturbation curricula should improve Stage 4 / hard-level generalisation and push mean reward higher. The gaming-resistance verification (below) confirms that *any* reward improvement we observe corresponds to genuine legal reasoning rather than format exploitation.
 
 ### Gaming Resistance Verified
 
