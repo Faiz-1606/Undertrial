@@ -714,6 +714,38 @@ def load_episodes(
         return all_eps  # all: for backward compat
 
 
+# ── Field canonicalization for API parity ──────────────────────────
+def _canonicalize_outcome(raw: str) -> str:
+    """Map model output to strict SubmitMemoAction enum: 'Bail Granted' | 'Bail Denied'."""
+    if not raw:
+        return "Bail Denied"
+    low = raw.strip().lower()
+    if any(k in low for k in ("grant", "allow", "conditional")):
+        return "Bail Granted"
+    return "Bail Denied"
+
+
+def _canonicalize_flight_risk(raw: str) -> str:
+    """Map model output to strict enum: 'Low' | 'Medium' | 'High'."""
+    if not raw:
+        return "Medium"
+    low = raw.strip().lower()
+    if "high" in low:
+        return "High"
+    if "low" in low:
+        return "Low"
+    return "Medium"
+
+
+def _ensure_str_list(val) -> List[str]:
+    """Ensure value is a list of non-empty strings."""
+    if not val:
+        return []
+    if isinstance(val, str):
+        return [val] if val.strip() else []
+    return [str(v) for v in val if v]
+
+
 def rollout_via_env_api(
     completion: str,
     episode: Dict,
@@ -722,10 +754,11 @@ def rollout_via_env_api(
     timeout: float = 10.0,
 ) -> float:
     """
-    Gap 1: Route reward through the live deployed environment API.
+    Route reward through the live deployed environment API.
 
     Sends the model's completion to the environment server via HTTP,
     replaying the parsed submit_memo action, and returns the official reward.
+    Fields are canonicalized to match the strict Pydantic schema before sending.
     Falls back to local reward on any network error.
     """
     import urllib.error
@@ -738,6 +771,13 @@ def rollout_via_env_api(
     if not parsed["recommended_outcome"]:
         return 0.0  # Malformed output
 
+    # Canonicalize fields to match SubmitMemoAction strict enums
+    canon_outcome = _canonicalize_outcome(parsed["recommended_outcome"])
+    canon_flight  = _canonicalize_flight_risk(parsed["flight_risk"])
+    canon_grounds_for = _ensure_str_list(parsed.get("grounds_for"))
+    canon_grounds_against = _ensure_str_list(parsed.get("grounds_against"))
+    canon_conditions = _ensure_str_list(parsed.get("conditions"))
+
     try:
         # Step 1: Reset the environment with the correct episode
         episode_stage = episode.get("curriculum_stage", 1)
@@ -747,19 +787,19 @@ def rollout_via_env_api(
             reset_data = json.loads(resp.read())
         sid = session_id or reset_data.get("session_id", "")
 
-        # Step 2: Submit the parsed memo
+        # Step 2: Submit the parsed memo with canonicalized fields
         memo_payload = json.dumps({
             "session_id": sid,
             "action": {
                 "tool_name": "submit_memo",
-                "flight_risk": parsed["flight_risk"] or "Medium",
+                "flight_risk": canon_flight,
                 "flight_risk_justification": parsed["flight_risk_just"] or "Not specified",
-                "statutory_eligible": parsed["statutory_eligible"],
+                "statutory_eligible": bool(parsed["statutory_eligible"]),
                 "statutory_computation": parsed["statutory_computation"] or "Not computed",
-                "grounds_for_bail": parsed["grounds_for"] or [],
-                "grounds_against_bail": parsed["grounds_against"] or [],
-                "recommended_outcome": parsed["recommended_outcome"],
-                "recommended_conditions": parsed["conditions"] or [],
+                "grounds_for_bail": canon_grounds_for or ["Case facts support bail"],
+                "grounds_against_bail": canon_grounds_against or ["Prosecution opposes bail"],
+                "recommended_outcome": canon_outcome,
+                "recommended_conditions": canon_conditions or [],
                 "confidence": "Medium",
             }
         }).encode()
@@ -773,16 +813,37 @@ def rollout_via_env_api(
             step_data = json.loads(resp.read())
         return float(step_data.get("reward", 0.0))
 
+    except urllib.error.HTTPError as he:
+        # Log the 422 response body for debugging
+        body = ""
+        try:
+            body = he.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        print(f"[env_api] HTTP {he.code} — {body[:200]}")
+        print(f"[env_api] Falling back to local reward")
+        if _local_reward and episode:
+            rd = _local_reward(
+                agent_outcome=canon_outcome,
+                agent_flight_risk=canon_flight,
+                agent_eligible=bool(parsed["statutory_eligible"]),
+                agent_computation=parsed["statutory_computation"] or "",
+                agent_conditions=canon_conditions,
+                episode=episode,
+            )
+            return rd["total_reward"]
+        return 0.0
+
     except Exception as e:
         # Network / parse error: fall back to local reward
         print(f"[env_api] Falling back to local reward: {e}")
         if _local_reward and episode:
             rd = _local_reward(
-                agent_outcome=parsed["recommended_outcome"],
-                agent_flight_risk=parsed["flight_risk"] or "Medium",
-                agent_eligible=parsed["statutory_eligible"],
+                agent_outcome=canon_outcome,
+                agent_flight_risk=canon_flight,
+                agent_eligible=bool(parsed["statutory_eligible"]),
                 agent_computation=parsed["statutory_computation"] or "",
-                agent_conditions=parsed["conditions"] or [],
+                agent_conditions=canon_conditions,
                 episode=episode,
             )
             return rd["total_reward"]
@@ -1274,9 +1335,9 @@ STAGE_NAMES = {
 # "medium" → Stage 2 only (contested, judgment calls)
 # "hard"   → Stages 3+4 (bias reversal + schema drift)
 DIFFICULTY_MAP = {
-    "easy":   {"stages": [1],    "sample": None, "steps": 70},   # 104 episodes
-    "medium": {"stages": [2],    "sample": None, "steps": 180},  # 761 episodes
-    "hard":   {"stages": [3, 4], "sample": None, "steps": 90},   # 335 episodes
+    "easy":   {"stages": [1],    "sample": None, "steps": 70,  "lr": 2e-5, "beta": 0.03},  # 104 eps, gentle
+    "medium": {"stages": [2],    "sample": None, "steps": 180, "lr": 3e-5, "beta": 0.04},  # 761 eps, bulk learning
+    "hard":   {"stages": [3, 4], "sample": None, "steps": 90,  "lr": 2e-5, "beta": 0.02},  # 335 eps, fine-tune
 }
 DIFFICULTY_NAMES = {
     "easy":   "Easy (landmark clear-cut cases, 104 episodes)",
@@ -1474,9 +1535,12 @@ def train_curriculum(
     for level in levels:
         level_name = level_names[level]
         steps = level_steps[level]
+        # Per-level LR/beta schedule (from DIFFICULTY_MAP or global default)
+        level_lr = DIFFICULTY_MAP[level].get("lr", lr) if use_difficulty_mode and level in DIFFICULTY_MAP else lr
+        level_beta = DIFFICULTY_MAP[level].get("beta", 0.04) if use_difficulty_mode and level in DIFFICULTY_MAP else 0.04
         print(f"\n{'━' * 60}")
         print(f"  LEVEL: {level_name}")
-        print(f"  Steps: {steps}")
+        print(f"  Steps: {steps} | LR: {level_lr} | Beta: {level_beta}")
         print(f"{'━' * 60}")
 
         # ── Inject traces from previous levels into prompt ──
@@ -1553,7 +1617,7 @@ def train_curriculum(
         level_output = f"{output_dir}/level_{level}" if use_difficulty_mode else f"{output_dir}/stage_{level}"
         config = GRPOConfig(
             output_dir=level_output,
-            learning_rate=lr,
+            learning_rate=level_lr,
             per_device_train_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
             num_train_epochs=1,
@@ -1561,7 +1625,7 @@ def train_curriculum(
             num_generations=4,             # 4 for T4 15GB (6 OOMs)
             max_completion_length=max_completion_length,
             temperature=0.9,               # Balanced: coherent but diverse
-            beta=0.04,                     # Stronger reward signal for LoRA
+            beta=level_beta,               # Per-level: gentler for easy/hard
             logging_steps=5,
             save_steps=50,
             report_to="wandb" if use_wandb else "none",
