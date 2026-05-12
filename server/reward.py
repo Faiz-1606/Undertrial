@@ -598,6 +598,97 @@ def reward_format(completion: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# 9. Consistency Gate (Anti-Hack Phase 2)
+# ---------------------------------------------------------------------------
+
+def compute_consistency_gate(
+    recommended_outcome: str,
+    flight_risk: str,
+    flight_risk_justification: str,
+    statutory_eligible: bool,
+    statutory_computation: str,
+    grounds_for: List[str],
+    grounds_against: List[str],
+    episode: Dict[str, Any],
+) -> float:
+    """
+    Cross-field consistency check to prevent reward hacking via boilerplate.
+
+    Checks:
+      1. Outcome ↔ Grounds: if granted, grounds_for must be non-empty + case-specific
+      2. Statutory ↔ Eligibility: if eligible=True, computation must contain numbers
+      3. Flight Risk ↔ Justification: label must not contradict justification
+
+    Returns multiplier 0.5–1.0. Applied to total reward.
+    A fully consistent memo gets 1.0 (no penalty).
+    Inconsistent memos get 0.5–0.9 depending on severity.
+    """
+    checks_passed = 0
+    total_checks = 3
+
+    crime_type = episode.get("crime_type", "").lower()
+    sections = episode.get("ipc_sections", [])
+    case_facts = crime_type + " ".join(str(s) for s in sections)
+
+    # ── Check 1: Outcome ↔ Grounds consistency ────────────────────────
+    outcome_lower = recommended_outcome.lower()
+    if "grant" in outcome_lower:
+        # Granted: grounds_for must be non-empty and mention something case-specific
+        if grounds_for and len(grounds_for) >= 1:
+            grounds_text = " ".join(grounds_for).lower()
+            # Must mention at least one case-specific word (not pure boilerplate)
+            has_specifics = any(
+                w in grounds_text
+                for w in crime_type.split() if len(w) > 3
+            ) or any(
+                str(s).strip() in grounds_text for s in sections
+            ) or len(grounds_text.split()) >= 15  # Or substantive length
+            checks_passed += 1 if has_specifics else 0.5
+        else:
+            checks_passed += 0  # Granted with no grounds = inconsistent
+    else:
+        # Denied: grounds_against should be non-empty
+        if grounds_against and len(grounds_against) >= 1:
+            checks_passed += 1
+        else:
+            checks_passed += 0.5  # Denied with no opposing grounds = weak
+
+    # ── Check 2: Statutory ↔ Eligibility consistency ──────────────────
+    comp = statutory_computation.lower() if statutory_computation else ""
+    has_numbers = bool(re.search(r'\d+', comp))
+    if statutory_eligible:
+        # If claiming eligible, computation must show actual numbers
+        checks_passed += 1 if has_numbers else 0.3
+    else:
+        # If claiming not eligible, any computation is fine
+        checks_passed += 1 if (has_numbers or len(comp.split()) >= 5) else 0.5
+
+    # ── Check 3: Flight Risk ↔ Justification consistency ─────────────
+    just = flight_risk_justification.lower() if flight_risk_justification else ""
+    risk_label = flight_risk.strip().lower() if flight_risk else ""
+
+    if just and len(just.split()) >= 10:
+        # Check for contradictions (already partially in reasoning_quality)
+        contradiction = False
+        if "low" in risk_label:
+            high_hits = sum(1 for kw in FLIGHT_RISK_KEYWORDS.get("High", []) if kw in just)
+            if high_hits >= 2:
+                contradiction = True
+        elif "high" in risk_label:
+            low_hits = sum(1 for kw in FLIGHT_RISK_KEYWORDS.get("Low", []) if kw in just)
+            if low_hits >= 2:
+                contradiction = True
+        checks_passed += 0.5 if contradiction else 1
+    else:
+        # Very short justification = weak
+        checks_passed += 0.3
+
+    # Convert to multiplier: 0.5 (worst) to 1.0 (fully consistent)
+    raw = checks_passed / total_checks  # 0.0 to 1.0
+    return 0.5 + 0.5 * raw  # Map to 0.5–1.0
+
+
+# ---------------------------------------------------------------------------
 # Master reward function
 # ---------------------------------------------------------------------------
 
@@ -678,15 +769,34 @@ def compute_reward(
     # Process reward: +0.05 if agent actually used the statutory tool.
     process_bonus = 0.05 if statutory_tool_used else 0.0
 
+    # Phase 2: Cap format-only contribution when outcome is wrong
+    # Format compliance can't save a fundamentally wrong answer
+    if om < 0:
+        fmt = min(fmt, 0.5)
+
+    # Phase 2: Consistency gate — cross-field coherence check
+    consistency = compute_consistency_gate(
+        recommended_outcome=agent_outcome,
+        flight_risk=agent_flight_risk,
+        flight_risk_justification=agent_flight_risk_justification,
+        statutory_eligible=agent_eligible,
+        statutory_computation=agent_computation,
+        grounds_for=agent_grounds_for or [],
+        grounds_against=agent_grounds_against or [],
+        episode=episode,
+    )
+
     # Reward formula:
     # Core (sum=1.0): 0.4*outcome_gated + 0.2*flight + 0.2*statutory + 0.2*conditions
     # Bonuses:        0.1*reasoning_quality + 0.05*efficiency + 0.05*format
     # Process:        +0.05 if statutory tool used
     # Penalty:        -0.3*bias
+    # Gate:           * consistency (0.5–1.0 multiplier)
     lam   = 0.3
-    total = (0.4*om_gated + 0.2*fr + 0.2*sa + 0.2*ca
-             + 0.1*rq + 0.05*efficiency + 0.05*fmt
-             + process_bonus - lam*bias)
+    raw_total = (0.4*om_gated + 0.2*fr + 0.2*sa + 0.2*ca
+                 + 0.1*rq + 0.05*efficiency + 0.05*fmt
+                 + process_bonus - lam*bias)
+    total = raw_total * consistency
 
     return {
         "outcome_match":             round(om,           4),
@@ -700,8 +810,10 @@ def compute_reward(
         "efficiency_bonus":          round(efficiency,   4),
         "process_bonus":             round(process_bonus,4),
         "bias_penalty":              round(bias,         4),
+        "consistency_gate":          round(consistency,  4),
         "total_reward":              round(total,        4),
         "ground_truth_outcome":      gt["outcome"],
         "agent_outcome":             agent_outcome,
         "steps_used":                step_count,
     }
+
