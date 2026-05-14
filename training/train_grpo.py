@@ -1750,7 +1750,8 @@ def train_curriculum(
             temperature=0.9,               # Balanced: coherent but diverse
             beta=level_beta,               # Per-level: gentler for easy/hard
             logging_steps=5,
-            save_steps=50,
+            save_strategy="steps",         # Required for save_steps to work
+            save_steps=25,                 # Checkpoint every 25 steps (~2h)
             report_to="wandb" if use_wandb else "none",
             remove_unused_columns=False,
         )
