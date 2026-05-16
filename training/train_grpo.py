@@ -1506,6 +1506,7 @@ def train_curriculum(
     profile: str = None,
     reward_mode: str = "offline",
     strict_gates: bool = False,
+    hf_save_repo: str = None,
 ):
     """
     Self-improving curriculum training.
@@ -1942,6 +1943,43 @@ def train_curriculum(
             print(f"  ✅ All plots copied to {kaggle_out} (Kaggle persistent)")
     except Exception:
         pass  # Not on Kaggle — skip silently
+
+    # ── Upload to HF Hub if repo specified ──
+    if hf_save_repo:
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            print(f"\n  Uploading to HF Hub: {hf_save_repo}")
+            # Create repo if it doesn't exist
+            api.create_repo(hf_save_repo, repo_type="model", exist_ok=True)
+            # Upload model adapters
+            api.upload_folder(
+                folder_path=final_dir,
+                repo_id=hf_save_repo,
+                path_in_repo="model",
+                commit_message="Upload trained LoRA adapters",
+            )
+            print(f"  ✅ Model uploaded to {hf_save_repo}/model")
+            # Upload plots + results
+            if root_plots.exists():
+                api.upload_folder(
+                    folder_path=str(root_plots),
+                    repo_id=hf_save_repo,
+                    path_in_repo="plots",
+                    commit_message="Upload training plots",
+                )
+                print(f"  ✅ Plots uploaded to {hf_save_repo}/plots")
+            if results_path.exists():
+                api.upload_file(
+                    path_or_fileobj=str(results_path),
+                    path_in_repo="curriculum_results.json",
+                    repo_id=hf_save_repo,
+                    commit_message="Upload training results",
+                )
+                print(f"  ✅ Results uploaded to {hf_save_repo}")
+        except Exception as e:
+            print(f"  ⚠ HF upload failed: {type(e).__name__}: {e}")
+            print(f"    Model is still saved locally at: {final_dir}")
 
     finish_wandb()
     return level_results
@@ -2393,6 +2431,8 @@ if __name__ == "__main__":
                         help="Reward source: offline (local), online (API), hybrid (local train + API eval)")
     parser.add_argument("--strict_gates", action="store_true",
                         help="Stop training if a level fails threshold (Phase 4 gating)")
+    parser.add_argument("--hf_save_repo", default=None,
+                        help="HF Hub repo to upload model+plots after training (e.g. Draken1606/undertrial-grpo)")
 
     args = parser.parse_args()
 
@@ -2437,6 +2477,7 @@ if __name__ == "__main__":
             profile=args.profile,
             reward_mode=args.reward_mode,
             strict_gates=args.strict_gates,
+            hf_save_repo=args.hf_save_repo,
         )
     elif args.adaptive:
         if args.env_url is None:
