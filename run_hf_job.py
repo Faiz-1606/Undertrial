@@ -34,7 +34,7 @@ results = train_curriculum(
     difficulties=["easy", "medium", "hard"],
     model_name="unsloth/Qwen2.5-7B-Instruct",
     wandb_disabled=True,
-    hf_save_repo="Draken1606/undertrial-grpo",
+    hf_save_repo="Draken1606/undertrialg",
 )
 
-print("\n✅ Training complete! Results uploaded to Draken1606/undertrial-grpo")
+print("\n✅ Training complete! Results uploaded to Draken1606/undertrial-grpo-v2")
