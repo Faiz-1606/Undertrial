@@ -1337,7 +1337,7 @@ STAGE_NAMES = {
 DIFFICULTY_MAP = {
     "easy":   {"stages": [1],    "sample": None, "steps": 70,  "lr": 2e-5, "beta": 0.03},  # 104 eps, gentle
     "medium": {"stages": [2],    "sample": None, "steps": 180, "lr": 3e-5, "beta": 0.04},  # 761 eps, bulk learning
-    "hard":   {"stages": [3, 4], "sample": None, "steps": 90,  "lr": 2e-5, "beta": 0.02},  # 335 eps, fine-tune
+    "hard":   {"stages": [3, 4], "sample": None, "steps": 90,  "lr": 1e-5, "beta": 0.05},  # 335 eps, gentle fine-tune + strong KL
 }
 DIFFICULTY_NAMES = {
     "easy":   "Easy (landmark clear-cut cases, 104 episodes)",
@@ -1437,13 +1437,13 @@ TRAINING_PROFILES = {
     "smoke": {
         "easy":   {"steps": 10, "lr": 2e-5, "beta": 0.03},
         "medium": {"steps": 0,  "lr": 3e-5, "beta": 0.04},  # skip
-        "hard":   {"steps": 0,  "lr": 2e-5, "beta": 0.02},  # skip
+        "hard":   {"steps": 0,  "lr": 1e-5, "beta": 0.05},  # skip
     },
     "dev": None,  # Use DIFFICULTY_MAP defaults
     "prod": {
         "easy":   {"steps": 200,  "lr": 2e-5, "beta": 0.03},
         "medium": {"steps": 600,  "lr": 3e-5, "beta": 0.04},
-        "hard":   {"steps": 400,  "lr": 2e-5, "beta": 0.02},
+        "hard":   {"steps": 400,  "lr": 1e-5, "beta": 0.05},
     },
 }
 
@@ -1659,7 +1659,7 @@ def train_curriculum(
         eval_stage = {"easy": 1, "medium": 2, "hard": 3}.get(level, level)
         print(f"\n  Evaluating baseline (stage {eval_stage})...")
         baseline_reward, _ = evaluate_on_stage(
-            model, tokenizer, episodes_dir, eval_stage, n_samples=12,
+            model, tokenizer, episodes_dir, eval_stage, n_samples=24,
             max_new_tokens=max_completion_length,
         )
         print(f"  Baseline: {baseline_reward:.4f}")
@@ -1679,6 +1679,16 @@ def train_curriculum(
             if quota_n and quota_n < len(episodes):
                 episodes = episodes[:quota_n]
                 print(f"  [DEMO] Capped to {quota_n} episodes (--episode_quota)")
+
+        # ── Replay buffer: mix 30% Medium episodes into Hard training ──
+        if use_difficulty_mode and level == "hard":
+            medium_episodes = load_episodes(episodes_dir, difficulty="medium")
+            if medium_episodes:
+                n_replay = max(1, int(len(episodes) * 0.3))
+                replay_sample = random.sample(medium_episodes, min(n_replay, len(medium_episodes)))
+                episodes = episodes + replay_sample
+                random.shuffle(episodes)
+                print(f"  [replay] Mixed {len(replay_sample)} Medium episodes into Hard ({len(episodes)} total)")
 
         print(f"  Training on {len(episodes)} episodes...")
 
@@ -1775,7 +1785,7 @@ def train_curriculum(
         # ── Post-training eval ──
         print(f"\n  Evaluating after {level_name} training...")
         post_reward, eval_results = evaluate_on_stage(
-            model, tokenizer, episodes_dir, eval_stage, n_samples=12,
+            model, tokenizer, episodes_dir, eval_stage, n_samples=24,
             max_new_tokens=max_completion_length,
         )
         improvement = post_reward - baseline_reward
