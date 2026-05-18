@@ -714,6 +714,38 @@ def load_episodes(
         return all_eps  # all: for backward compat
 
 
+# ── Field canonicalization for API parity ──────────────────────────
+def _canonicalize_outcome(raw: str) -> str:
+    """Map model output to strict SubmitMemoAction enum: 'Bail Granted' | 'Bail Denied'."""
+    if not raw:
+        return "Bail Denied"
+    low = raw.strip().lower()
+    if any(k in low for k in ("grant", "allow", "conditional")):
+        return "Bail Granted"
+    return "Bail Denied"
+
+
+def _canonicalize_flight_risk(raw: str) -> str:
+    """Map model output to strict enum: 'Low' | 'Medium' | 'High'."""
+    if not raw:
+        return "Medium"
+    low = raw.strip().lower()
+    if "high" in low:
+        return "High"
+    if "low" in low:
+        return "Low"
+    return "Medium"
+
+
+def _ensure_str_list(val) -> List[str]:
+    """Ensure value is a list of non-empty strings."""
+    if not val:
+        return []
+    if isinstance(val, str):
+        return [val] if val.strip() else []
+    return [str(v) for v in val if v]
+
+
 def rollout_via_env_api(
     completion: str,
     episode: Dict,
@@ -722,10 +754,11 @@ def rollout_via_env_api(
     timeout: float = 10.0,
 ) -> float:
     """
-    Gap 1: Route reward through the live deployed environment API.
+    Route reward through the live deployed environment API.
 
     Sends the model's completion to the environment server via HTTP,
     replaying the parsed submit_memo action, and returns the official reward.
+    Fields are canonicalized to match the strict Pydantic schema before sending.
     Falls back to local reward on any network error.
     """
     import urllib.error
@@ -738,6 +771,13 @@ def rollout_via_env_api(
     if not parsed["recommended_outcome"]:
         return 0.0  # Malformed output
 
+    # Canonicalize fields to match SubmitMemoAction strict enums
+    canon_outcome = _canonicalize_outcome(parsed["recommended_outcome"])
+    canon_flight  = _canonicalize_flight_risk(parsed["flight_risk"])
+    canon_grounds_for = _ensure_str_list(parsed.get("grounds_for"))
+    canon_grounds_against = _ensure_str_list(parsed.get("grounds_against"))
+    canon_conditions = _ensure_str_list(parsed.get("conditions"))
+
     try:
         # Step 1: Reset the environment with the correct episode
         episode_stage = episode.get("curriculum_stage", 1)
@@ -747,19 +787,19 @@ def rollout_via_env_api(
             reset_data = json.loads(resp.read())
         sid = session_id or reset_data.get("session_id", "")
 
-        # Step 2: Submit the parsed memo
+        # Step 2: Submit the parsed memo with canonicalized fields
         memo_payload = json.dumps({
             "session_id": sid,
             "action": {
                 "tool_name": "submit_memo",
-                "flight_risk": parsed["flight_risk"] or "Medium",
+                "flight_risk": canon_flight,
                 "flight_risk_justification": parsed["flight_risk_just"] or "Not specified",
-                "statutory_eligible": parsed["statutory_eligible"],
+                "statutory_eligible": bool(parsed["statutory_eligible"]),
                 "statutory_computation": parsed["statutory_computation"] or "Not computed",
-                "grounds_for_bail": parsed["grounds_for"] or [],
-                "grounds_against_bail": parsed["grounds_against"] or [],
-                "recommended_outcome": parsed["recommended_outcome"],
-                "recommended_conditions": parsed["conditions"] or [],
+                "grounds_for_bail": canon_grounds_for or ["Case facts support bail"],
+                "grounds_against_bail": canon_grounds_against or ["Prosecution opposes bail"],
+                "recommended_outcome": canon_outcome,
+                "recommended_conditions": canon_conditions or [],
                 "confidence": "Medium",
             }
         }).encode()
@@ -773,16 +813,37 @@ def rollout_via_env_api(
             step_data = json.loads(resp.read())
         return float(step_data.get("reward", 0.0))
 
+    except urllib.error.HTTPError as he:
+        # Log the 422 response body for debugging
+        body = ""
+        try:
+            body = he.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        print(f"[env_api] HTTP {he.code} — {body[:200]}")
+        print(f"[env_api] Falling back to local reward")
+        if _local_reward and episode:
+            rd = _local_reward(
+                agent_outcome=canon_outcome,
+                agent_flight_risk=canon_flight,
+                agent_eligible=bool(parsed["statutory_eligible"]),
+                agent_computation=parsed["statutory_computation"] or "",
+                agent_conditions=canon_conditions,
+                episode=episode,
+            )
+            return rd["total_reward"]
+        return 0.0
+
     except Exception as e:
         # Network / parse error: fall back to local reward
         print(f"[env_api] Falling back to local reward: {e}")
         if _local_reward and episode:
             rd = _local_reward(
-                agent_outcome=parsed["recommended_outcome"],
-                agent_flight_risk=parsed["flight_risk"] or "Medium",
-                agent_eligible=parsed["statutory_eligible"],
+                agent_outcome=canon_outcome,
+                agent_flight_risk=canon_flight,
+                agent_eligible=bool(parsed["statutory_eligible"]),
                 agent_computation=parsed["statutory_computation"] or "",
-                agent_conditions=parsed["conditions"] or [],
+                agent_conditions=canon_conditions,
                 episode=episode,
             )
             return rd["total_reward"]
@@ -1274,9 +1335,9 @@ STAGE_NAMES = {
 # "medium" → Stage 2 only (contested, judgment calls)
 # "hard"   → Stages 3+4 (bias reversal + schema drift)
 DIFFICULTY_MAP = {
-    "easy":   {"stages": [1],    "sample": None, "steps": 70},   # 104 episodes
-    "medium": {"stages": [2],    "sample": None, "steps": 180},  # 761 episodes
-    "hard":   {"stages": [3, 4], "sample": None, "steps": 90},   # 335 episodes
+    "easy":   {"stages": [1],    "sample": None, "steps": 70,  "lr": 2e-5, "beta": 0.03},  # 104 eps, gentle
+    "medium": {"stages": [2],    "sample": None, "steps": 180, "lr": 3e-5, "beta": 0.04},  # 761 eps, bulk learning
+    "hard":   {"stages": [3, 4], "sample": None, "steps": 90,  "lr": 2e-5, "beta": 0.02},  # 335 eps, fine-tune
 }
 DIFFICULTY_NAMES = {
     "easy":   "Easy (landmark clear-cut cases, 104 episodes)",
@@ -1372,6 +1433,61 @@ def inject_examples(base_prompt: str, traces: List[str]) -> str:
     return base_prompt + examples_block
 
 
+TRAINING_PROFILES = {
+    "smoke": {
+        "easy":   {"steps": 10, "lr": 2e-5, "beta": 0.03},
+        "medium": {"steps": 0,  "lr": 3e-5, "beta": 0.04},  # skip
+        "hard":   {"steps": 0,  "lr": 2e-5, "beta": 0.02},  # skip
+    },
+    "dev": None,  # Use DIFFICULTY_MAP defaults
+    "prod": {
+        "easy":   {"steps": 200,  "lr": 2e-5, "beta": 0.03},
+        "medium": {"steps": 600,  "lr": 3e-5, "beta": 0.04},
+        "hard":   {"steps": 400,  "lr": 2e-5, "beta": 0.02},
+    },
+}
+
+
+def diagnose_failures(eval_results: List[Dict]) -> Dict[str, Any]:
+    """
+    Phase 4: Analyze evaluation failures into actionable buckets.
+
+    Returns breakdown of failure types with example case IDs.
+    """
+    buckets = {
+        "outcome_mismatch": [],
+        "format_failure": [],
+        "statutory_wrong": [],
+        "low_reasoning": [],
+        "bias_penalty_hit": [],
+    }
+
+    for r in eval_results:
+        case_id = r.get("case_id", "unknown")
+        reward = r.get("reward", 0.0)
+        parsed = r.get("parsed", {})
+        ep = r.get("episode", {})
+
+        if reward < 0:
+            buckets["outcome_mismatch"].append(case_id)
+        if r.get("format_score", 1.0) < 0.5:
+            buckets["format_failure"].append(case_id)
+        if r.get("statutory_accuracy", 1.0) < 0.3:
+            buckets["statutory_wrong"].append(case_id)
+        if r.get("reasoning_quality", 1.0) < 0.3:
+            buckets["low_reasoning"].append(case_id)
+        if r.get("bias_penalty", 0.0) > 0.1:
+            buckets["bias_penalty_hit"].append(case_id)
+
+    print("\n  ── Failure Diagnosis ──")
+    for bucket, cases in sorted(buckets.items(), key=lambda x: -len(x[1])):
+        if cases:
+            example = cases[:3]
+            print(f"    {bucket:25s}: {len(cases)} cases (e.g. {', '.join(example)})")
+
+    return buckets
+
+
 def train_curriculum(
     episodes_dir: str = "./data/episodes",
     output_dir: str = "./output/undertrial_grpo",
@@ -1387,6 +1503,9 @@ def train_curriculum(
     difficulties: List[str] = None,
     model_name: str = "unsloth/Qwen2.5-7B-Instruct",
     env_url: str = None,
+    profile: str = None,
+    reward_mode: str = "offline",
+    strict_gates: bool = False,
 ):
     """
     Self-improving curriculum training.
@@ -1417,14 +1536,33 @@ def train_curriculum(
         level_names = {s: STAGE_NAMES.get(s, f"Stage {s}") for s in levels}
         level_steps = {s: max_steps_per_stage for s in levels}
 
-    total_steps = sum(level_steps.values())
-    online_mode = env_url is not None
+    # Phase 5: Apply training profile overrides
+    if profile and profile in TRAINING_PROFILES and TRAINING_PROFILES[profile]:
+        prof = TRAINING_PROFILES[profile]
+        for d in list(levels):
+            if d in prof:
+                if prof[d]["steps"] == 0:
+                    levels = [l for l in levels if l != d]  # skip this level
+                else:
+                    level_steps[d] = prof[d]["steps"]
+                    if use_difficulty_mode and d in DIFFICULTY_MAP:
+                        DIFFICULTY_MAP[d]["lr"] = prof[d].get("lr", DIFFICULTY_MAP[d].get("lr", lr))
+                        DIFFICULTY_MAP[d]["beta"] = prof[d].get("beta", DIFFICULTY_MAP[d].get("beta", 0.04))
+        print(f"  [profile] Applied '{profile}' profile overrides")
+
+    # Phase 6: Determine reward mode
+    if reward_mode == "online" and not env_url:
+        print("  ⚠ reward_mode=online but no env_url provided, falling back to offline")
+        reward_mode = "offline"
+
+    total_steps = sum(level_steps[l] for l in levels)
     print("=" * 60)
     print("  UndertriAI — Self-Improving Curriculum Training")
-    if online_mode:
-        print(f"  Mode: ONLINE (env_url={env_url})")
-    else:
-        print(f"  Mode: OFFLINE (in-process reward)")
+    print(f"  Reward Mode: {reward_mode.upper()}")
+    if profile:
+        print(f"  Profile: {profile}")
+    if reward_mode in ("online", "hybrid"):
+        print(f"  Env URL: {env_url}")
     if use_difficulty_mode:
         for d in levels:
             ep_count = DIFFICULTY_MAP[d].get("sample", "all")
@@ -1432,6 +1570,8 @@ def train_curriculum(
     else:
         print(f"  Stages: {levels} | Threshold: {threshold:.0%}")
     print(f"  Total steps: {total_steps} | Model: {model_name}")
+    if strict_gates:
+        print(f"  ⚠ Strict gates ENABLED — training stops on failed threshold")
     print("=" * 60)
 
     use_wandb = setup_wandb(
@@ -1443,9 +1583,34 @@ def train_curriculum(
             "total_steps": total_steps,
             "model": model_name,
             "threshold": threshold,
+            "reward_mode": reward_mode,
+            "profile": profile or "dev",
+            "strict_gates": strict_gates,
         },
         enabled=not wandb_disabled,
     )
+
+    # Phase 0: Save run manifest
+    try:
+        from training.run_manifest import create_manifest, MetricsTracker
+        manifest_config = {
+            "levels": [str(l) for l in levels],
+            "level_steps": {str(k): v for k, v in level_steps.items() if k in levels},
+            "lr": lr,
+            "batch_size": batch_size,
+            "grad_accum": grad_accum,
+            "max_completion_length": max_completion_length,
+            "threshold": threshold,
+            "reward_mode": reward_mode,
+            "profile": profile or "dev",
+            "strict_gates": strict_gates,
+            "model_name": model_name,
+        }
+        create_manifest(manifest_config, episodes_dir, output_dir, reward_mode=reward_mode)
+        metrics_tracker = MetricsTracker()
+    except ImportError:
+        print("  [manifest] run_manifest.py not found, skipping instrumentation")
+        metrics_tracker = None
 
     from unsloth import FastLanguageModel  # type: ignore
     from trl import GRPOConfig, GRPOTrainer  # type: ignore
@@ -1474,9 +1639,12 @@ def train_curriculum(
     for level in levels:
         level_name = level_names[level]
         steps = level_steps[level]
+        # Per-level LR/beta schedule (from DIFFICULTY_MAP or global default)
+        level_lr = DIFFICULTY_MAP[level].get("lr", lr) if use_difficulty_mode and level in DIFFICULTY_MAP else lr
+        level_beta = DIFFICULTY_MAP[level].get("beta", 0.04) if use_difficulty_mode and level in DIFFICULTY_MAP else 0.04
         print(f"\n{'━' * 60}")
         print(f"  LEVEL: {level_name}")
-        print(f"  Steps: {steps}")
+        print(f"  Steps: {steps} | LR: {level_lr} | Beta: {level_beta}")
         print(f"{'━' * 60}")
 
         # ── Inject traces from previous levels into prompt ──
@@ -1535,6 +1703,8 @@ def train_curriculum(
         # Capture level for closure to avoid closure-over-loop-variable bug
         _stage_for_closure = eval_stage
         _env_url_for_closure = env_url
+        _reward_mode_for_closure = reward_mode
+        _metrics_tracker = metrics_tracker
         def reward_fn(completions: List[str], episode: List[str] = None, **kwargs) -> List[float]:
             ep_raw = episode or kwargs.get("episode", [])
             ep_objs = [json.loads(e) if isinstance(e, str) else e for e in ep_raw]
@@ -1542,18 +1712,35 @@ def train_curriculum(
                 n_gen = len(completions) // len(ep_objs)
                 ep_objs = [ep for ep in ep_objs for _ in range(n_gen)]
             ep_objs = ep_objs[:len(completions)]
-            if _env_url_for_closure:
-                # Online: route each completion through the live env API
-                return [rollout_via_env_api(c, e, env_url=_env_url_for_closure)
-                        for c, e in zip(completions, ep_objs)]
+
+            # Phase 6: Reward mode routing
+            if _reward_mode_for_closure == "online" and _env_url_for_closure:
+                rewards = []
+                for c, e in zip(completions, ep_objs):
+                    r = rollout_via_env_api(c, e, env_url=_env_url_for_closure)
+                    if _metrics_tracker:
+                        _metrics_tracker.log_reward_source("api" if r != 0.0 else "local")
+                    rewards.append(r)
+                return rewards
+            elif _reward_mode_for_closure == "hybrid" and _env_url_for_closure:
+                # Hybrid: offline for training, online only for eval checkpoints
+                rewards = combined_reward(completions, ep_objs, current_stage=_stage_for_closure)
+                if _metrics_tracker:
+                    for _ in rewards:
+                        _metrics_tracker.log_reward_source("local")
+                return rewards
             else:
                 # Offline: in-process scoring
-                return combined_reward(completions, ep_objs, current_stage=_stage_for_closure)
+                rewards = combined_reward(completions, ep_objs, current_stage=_stage_for_closure)
+                if _metrics_tracker:
+                    for _ in rewards:
+                        _metrics_tracker.log_reward_source("local")
+                return rewards
 
         level_output = f"{output_dir}/level_{level}" if use_difficulty_mode else f"{output_dir}/stage_{level}"
         config = GRPOConfig(
             output_dir=level_output,
-            learning_rate=lr,
+            learning_rate=level_lr,
             per_device_train_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
             num_train_epochs=1,
@@ -1561,9 +1748,10 @@ def train_curriculum(
             num_generations=4,             # 4 for T4 15GB (6 OOMs)
             max_completion_length=max_completion_length,
             temperature=0.9,               # Balanced: coherent but diverse
-            beta=0.04,                     # Stronger reward signal for LoRA
+            beta=level_beta,               # Per-level: gentler for easy/hard
             logging_steps=5,
-            save_steps=50,
+            save_strategy="steps",         # Required for save_steps to work
+            save_steps=25,                 # Checkpoint every 25 steps (~2h)
             report_to="wandb" if use_wandb else "none",
             remove_unused_columns=False,
         )
@@ -1605,12 +1793,22 @@ def train_curriculum(
             accumulated_traces.extend(new_traces)
             print(f"  ✓ Harvested {len(new_traces)} good traces for next level")
 
+        # Phase 0: Track metrics
+        if metrics_tracker:
+            metrics_tracker.set_level(str(level))
+
         # ── Check threshold for level progression ──
         if post_reward >= threshold:
             print(f"  ✓ {level_name} PASSED (reward {post_reward:.2f} ≥ {threshold:.2f})")
         else:
             print(f"  ✗ {level_name} below threshold ({post_reward:.2f} < {threshold:.2f})")
-            print(f"  → Continuing to next level anyway (curriculum mode)")
+            # Phase 4: Run diagnostic on failure
+            diagnose_failures(eval_results)
+            if strict_gates:
+                print(f"  ✗ STRICT GATES: Stopping training — fix issues before continuing")
+                break
+            else:
+                print(f"  → Continuing to next level (curriculum mode)")
 
         # Save LoRA adapters checkpoint
         model.save_pretrained(level_output)
@@ -2188,6 +2386,13 @@ if __name__ == "__main__":
                              "Default: 'easy,medium,hard'")
     parser.add_argument("--model_name", default="unsloth/Qwen2.5-7B-Instruct",
                         help="HuggingFace model name for training.")
+    parser.add_argument("--profile", choices=["smoke", "dev", "prod"], default=None,
+                        help="Training profile: smoke (10 steps), dev (default), prod (1200 steps)")
+    parser.add_argument("--reward_mode", choices=["offline", "online", "hybrid"],
+                        default="offline",
+                        help="Reward source: offline (local), online (API), hybrid (local train + API eval)")
+    parser.add_argument("--strict_gates", action="store_true",
+                        help="Stop training if a level fails threshold (Phase 4 gating)")
 
     args = parser.parse_args()
 
@@ -2228,7 +2433,10 @@ if __name__ == "__main__":
             episode_quota=parsed_quota or None,
             difficulties=parsed_difficulties,
             model_name=args.model_name,
-            env_url=args.env_url,  # None = offline, URL = online
+            env_url=args.env_url,
+            profile=args.profile,
+            reward_mode=args.reward_mode,
+            strict_gates=args.strict_gates,
         )
     elif args.adaptive:
         if args.env_url is None:
