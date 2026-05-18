@@ -58,6 +58,9 @@ Overrides (environment variables)
     UNDERTRIAL_WORK_DIR      default: /work   (where the repo will live)
     UNDERTRIAL_ENV_URL       default: https://draken1606-undertrial-ai.hf.space
                               (forwarded to train_grpo.py if --env_url absent)
+    UNDERTRIAL_HF_SAVE_REPO  default: Draken1606/undertrial-grpo-final
+                              (forwarded as --hf_save_repo if absent so the
+                              trained adapters actually survive the job)
 """
 from __future__ import annotations
 
@@ -84,6 +87,10 @@ WORK_DIR = Path(os.environ.get("UNDERTRIAL_WORK_DIR", "/work"))
 DEFAULT_ENV_URL = os.environ.get(
     "UNDERTRIAL_ENV_URL",
     "https://draken1606-undertrial-ai.hf.space",
+)
+DEFAULT_HF_SAVE_REPO = os.environ.get(
+    "UNDERTRIAL_HF_SAVE_REPO",
+    "Draken1606/undertrial-grpo-final",
 )
 
 
@@ -188,6 +195,11 @@ def _forward_args(extra: list[str], work_root: Path) -> list[str]:
     )
     if "--env_url" not in args and "--offline" not in args and not reward_mode_offline:
         args += ["--env_url", DEFAULT_ENV_URL]
+    # Without --hf_save_repo the trained adapters only live inside the
+    # ephemeral HF Job container and disappear at teardown. Auto-inject a
+    # default destination if the user didn't pick one.
+    if "--hf_save_repo" not in args and DEFAULT_HF_SAVE_REPO:
+        args += ["--hf_save_repo", DEFAULT_HF_SAVE_REPO]
     return args
 
 
@@ -202,13 +214,31 @@ def main() -> int:
     forwarded = _forward_args(sys.argv[1:], work_root)
     cmd = [sys.executable, str(train_script), *forwarded]
 
+    # Child-process environment:
+    #   * PYTHONPATH includes the repo root so `from server.reward`,
+    #     `from tests.test_anti_hack`, `from training.run_manifest` resolve
+    #     (the preflight gates and run-manifest instrumentation depend on
+    #     these imports succeeding).
+    #   * PYTHONUNBUFFERED=1 so HF Jobs gets line-fresh logs instead of
+    #     blocks that arrive minutes later.
+    #   * HF_HUB_ENABLE_HF_TRANSFER=1 actually activates the `hf_transfer`
+    #     accelerator we already pin in the UV deps header.
+    child_env = os.environ.copy()
+    existing_pp = child_env.get("PYTHONPATH", "")
+    child_env["PYTHONPATH"] = (
+        f"{work_root}{os.pathsep}{existing_pp}" if existing_pp else str(work_root)
+    )
+    child_env.setdefault("PYTHONUNBUFFERED", "1")
+    child_env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
     _log(f"cwd          = {work_root}")
     _log(f"python       = {sys.executable}")
     _log(f"train script = {train_script}")
     _log(f"args         = {forwarded}")
+    _log(f"PYTHONPATH   = {child_env['PYTHONPATH']}")
     _log("launching train_grpo.py …")
 
-    proc = subprocess.run(cmd, cwd=work_root)
+    proc = subprocess.run(cmd, cwd=work_root, env=child_env)
     _log(f"train_grpo.py exited with code {proc.returncode}")
     return proc.returncode
 

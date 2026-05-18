@@ -31,6 +31,16 @@ from datetime import datetime
 import urllib.request
 import urllib.parse
 
+# HF Jobs runs this script as `python training/train_grpo.py` from the repo
+# root, which puts `training/` (not the repo root) on sys.path. Without this
+# insert, `from server.reward import ...`, `from tests.test_anti_hack import ...`
+# and `from training.run_manifest import ...` all silently fall through the
+# try/except guards and the preflight gates + manifest get skipped, marking
+# every otherwise-good checkpoint as `rejected_model/`.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 try:
     import unsloth  # noqa: F401 — optional; loaded lazily inside training functions
 except (ImportError, NotImplementedError, RuntimeError):
@@ -2399,6 +2409,33 @@ def train_curriculum(
         model.save_pretrained(level_output)
         tokenizer.save_pretrained(level_output)
         print(f"  Checkpoint saved (adapters): {level_output}")
+
+        # Upload this level's checkpoint to HF Hub so a mid-run crash on a
+        # later (longer) level doesn't lose everything. The final upload at
+        # the end of train_curriculum() also pushes `final/` to `model/` —
+        # this just guarantees per-level survivability.
+        if hf_save_repo:
+            try:
+                from huggingface_hub import HfApi
+                _level_api = HfApi()
+                _level_api.create_repo(hf_save_repo, repo_type="model", exist_ok=True)
+                _level_path_in_repo = f"checkpoints/level_{level}"
+                _level_api.upload_folder(
+                    folder_path=level_output,
+                    repo_id=hf_save_repo,
+                    path_in_repo=_level_path_in_repo,
+                    commit_message=f"Upload {level_name} level adapters",
+                )
+                print(
+                    f"  ✅ Uploaded {level_name} checkpoint → "
+                    f"{hf_save_repo}/{_level_path_in_repo}"
+                )
+            except Exception as upload_err:
+                print(
+                    f"  ⚠ Per-level HF upload failed "
+                    f"({type(upload_err).__name__}: {upload_err}); "
+                    f"continuing — final upload at end of run may still succeed"
+                )
 
         # ── Per-level artefacts: reward curve + incremental results JSON ──
         try:
