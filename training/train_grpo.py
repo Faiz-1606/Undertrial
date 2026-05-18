@@ -1337,7 +1337,7 @@ STAGE_NAMES = {
 DIFFICULTY_MAP = {
     "easy":   {"stages": [1],    "sample": None, "steps": 70,  "lr": 2e-5, "beta": 0.03},  # 104 eps, gentle
     "medium": {"stages": [2],    "sample": None, "steps": 180, "lr": 3e-5, "beta": 0.04},  # 761 eps, bulk learning
-    "hard":   {"stages": [3, 4], "sample": None, "steps": 90,  "lr": 2e-5, "beta": 0.02},  # 335 eps, fine-tune
+    "hard":   {"stages": [3, 4], "sample": None, "steps": 90,  "lr": 1e-5, "beta": 0.05},  # 335 eps, gentle fine-tune + strong KL
 }
 DIFFICULTY_NAMES = {
     "easy":   "Easy (landmark clear-cut cases, 104 episodes)",
@@ -1437,13 +1437,13 @@ TRAINING_PROFILES = {
     "smoke": {
         "easy":   {"steps": 10, "lr": 2e-5, "beta": 0.03},
         "medium": {"steps": 0,  "lr": 3e-5, "beta": 0.04},  # skip
-        "hard":   {"steps": 0,  "lr": 2e-5, "beta": 0.02},  # skip
+        "hard":   {"steps": 0,  "lr": 1e-5, "beta": 0.05},  # skip
     },
     "dev": None,  # Use DIFFICULTY_MAP defaults
     "prod": {
         "easy":   {"steps": 200,  "lr": 2e-5, "beta": 0.03},
         "medium": {"steps": 600,  "lr": 3e-5, "beta": 0.04},
-        "hard":   {"steps": 400,  "lr": 2e-5, "beta": 0.02},
+        "hard":   {"steps": 400,  "lr": 1e-5, "beta": 0.05},
     },
 }
 
@@ -1506,6 +1506,7 @@ def train_curriculum(
     profile: str = None,
     reward_mode: str = "offline",
     strict_gates: bool = False,
+    hf_save_repo: str = None,
 ):
     """
     Self-improving curriculum training.
@@ -1658,7 +1659,7 @@ def train_curriculum(
         eval_stage = {"easy": 1, "medium": 2, "hard": 3}.get(level, level)
         print(f"\n  Evaluating baseline (stage {eval_stage})...")
         baseline_reward, _ = evaluate_on_stage(
-            model, tokenizer, episodes_dir, eval_stage, n_samples=12,
+            model, tokenizer, episodes_dir, eval_stage, n_samples=24,
             max_new_tokens=max_completion_length,
         )
         print(f"  Baseline: {baseline_reward:.4f}")
@@ -1678,6 +1679,16 @@ def train_curriculum(
             if quota_n and quota_n < len(episodes):
                 episodes = episodes[:quota_n]
                 print(f"  [DEMO] Capped to {quota_n} episodes (--episode_quota)")
+
+        # ── Replay buffer: mix 30% Medium episodes into Hard training ──
+        if use_difficulty_mode and level == "hard":
+            medium_episodes = load_episodes(episodes_dir, difficulty="medium")
+            if medium_episodes:
+                n_replay = max(1, int(len(episodes) * 0.3))
+                replay_sample = random.sample(medium_episodes, min(n_replay, len(medium_episodes)))
+                episodes = episodes + replay_sample
+                random.shuffle(episodes)
+                print(f"  [replay] Mixed {len(replay_sample)} Medium episodes into Hard ({len(episodes)} total)")
 
         print(f"  Training on {len(episodes)} episodes...")
 
@@ -1774,7 +1785,7 @@ def train_curriculum(
         # ── Post-training eval ──
         print(f"\n  Evaluating after {level_name} training...")
         post_reward, eval_results = evaluate_on_stage(
-            model, tokenizer, episodes_dir, eval_stage, n_samples=12,
+            model, tokenizer, episodes_dir, eval_stage, n_samples=24,
             max_new_tokens=max_completion_length,
         )
         improvement = post_reward - baseline_reward
@@ -1942,6 +1953,43 @@ def train_curriculum(
             print(f"  ✅ All plots copied to {kaggle_out} (Kaggle persistent)")
     except Exception:
         pass  # Not on Kaggle — skip silently
+
+    # ── Upload to HF Hub if repo specified ──
+    if hf_save_repo:
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            print(f"\n  Uploading to HF Hub: {hf_save_repo}")
+            # Create repo if it doesn't exist
+            api.create_repo(hf_save_repo, repo_type="model", exist_ok=True)
+            # Upload model adapters
+            api.upload_folder(
+                folder_path=final_dir,
+                repo_id=hf_save_repo,
+                path_in_repo="model",
+                commit_message="Upload trained LoRA adapters",
+            )
+            print(f"  ✅ Model uploaded to {hf_save_repo}/model")
+            # Upload plots + results
+            if root_plots.exists():
+                api.upload_folder(
+                    folder_path=str(root_plots),
+                    repo_id=hf_save_repo,
+                    path_in_repo="plots",
+                    commit_message="Upload training plots",
+                )
+                print(f"  ✅ Plots uploaded to {hf_save_repo}/plots")
+            if results_path.exists():
+                api.upload_file(
+                    path_or_fileobj=str(results_path),
+                    path_in_repo="curriculum_results.json",
+                    repo_id=hf_save_repo,
+                    commit_message="Upload training results",
+                )
+                print(f"  ✅ Results uploaded to {hf_save_repo}")
+        except Exception as e:
+            print(f"  ⚠ HF upload failed: {type(e).__name__}: {e}")
+            print(f"    Model is still saved locally at: {final_dir}")
 
     finish_wandb()
     return level_results
@@ -2393,6 +2441,8 @@ if __name__ == "__main__":
                         help="Reward source: offline (local), online (API), hybrid (local train + API eval)")
     parser.add_argument("--strict_gates", action="store_true",
                         help="Stop training if a level fails threshold (Phase 4 gating)")
+    parser.add_argument("--hf_save_repo", default=None,
+                        help="HF Hub repo to upload model+plots after training (e.g. Draken1606/undertrial-grpo)")
 
     args = parser.parse_args()
 
@@ -2437,6 +2487,7 @@ if __name__ == "__main__":
             profile=args.profile,
             reward_mode=args.reward_mode,
             strict_gates=args.strict_gates,
+            hf_save_repo=args.hf_save_repo,
         )
     elif args.adaptive:
         if args.env_url is None:
