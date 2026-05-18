@@ -24,7 +24,7 @@ Or locally:
 # CELL 2 — Imports
 # ============================================================
 
-import os, sys, json, re, argparse, random, time
+import os, sys, json, re, argparse, random, time, hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -33,7 +33,7 @@ import urllib.parse
 
 try:
     import unsloth  # noqa: F401 — optional; loaded lazily inside training functions
-except ImportError:
+except (ImportError, NotImplementedError, RuntimeError):
     pass  # Will be imported inside train_curriculum() / train() when needed
 
 try:
@@ -137,6 +137,7 @@ try:
         compute_bias_penalty as _server_bias,
         compute_reasoning_quality,
         compute_think_factor,
+        compute_reward as _server_compute_reward,
         reward_format as server_reward_format,
         _is_ndps_case,
     )
@@ -171,6 +172,7 @@ except ImportError:
 
     # Local fallback server_reward_format
     server_reward_format = None  # Will use local reward_format below
+    _server_compute_reward = None
 
 try:
     from datasets import Dataset
@@ -429,7 +431,10 @@ def reward_statutory(completions: List[str], episode_batch: List[Dict], **kwargs
             special_laws = "INFERRED"
 
         # Standard IPC/BNSS threshold computation
-        half_sent_months = (max_sent * 12) / 3.0
+        # AUDIT FIX (Workstream A): was /3.0 (33% threshold) — must be /2 (50%)
+        # to match server/reward.py compute_statutory_accuracy() and the legal
+        # standard for default bail under Section 436A CrPC / 479 BNSS.
+        half_sent_months = (max_sent * 12) / 2.0
         truly_eligible = (custody >= half_sent_months) and not special_laws
 
         score = 0.0
@@ -511,6 +516,36 @@ def reward_no_bias(completions: List[str], episode_batch: List[Dict], **kwargs) 
     return scores
 
 
+def _infer_statutory_tool_used(parsed: Dict[str, Any], episode: Dict[str, Any]) -> bool:
+    """Offline proxy for the server's statutory-tool process bonus."""
+    custody_mo = episode.get("custody_months") or 0.0
+    max_sent = episode.get("max_sentence_years", 5.0)
+    if custody_mo <= 0:
+        return False
+
+    comp_text = (parsed.get("statutory_computation") or "").lower()
+    threshold_mo = (max_sent * 12) / 2.0
+    custody_tokens = {str(int(custody_mo)), f"{custody_mo:.1f}"}
+    threshold_tokens = {str(int(threshold_mo)), f"{threshold_mo:.1f}"}
+    return (
+        any(token in comp_text for token in custody_tokens)
+        and any(token in comp_text for token in threshold_tokens)
+    )
+
+
+def _resolve_tool_used_flag(
+    explicit_flag: Any,
+    idx: int,
+    parsed: Dict[str, Any],
+    episode: Dict[str, Any],
+) -> bool:
+    if explicit_flag is None:
+        return _infer_statutory_tool_used(parsed, episode)
+    if isinstance(explicit_flag, (list, tuple)):
+        return bool(explicit_flag[idx]) if idx < len(explicit_flag) else False
+    return bool(explicit_flag)
+
+
 def combined_reward(
     completions: List[str],
     episode_batch: List[Dict],
@@ -522,11 +557,11 @@ def combined_reward(
 
     Formula:
         R = 0.4*outcome_gated + 0.2*flight_risk + 0.2*statutory + 0.2*condition
-          + 0.1*reasoning_quality + 0.05*format + 0.05*process_bonus
+          + 0.1*reasoning_quality + 0.05*format + process_bonus
           - 0.3*bias
 
     Core (sum=1.0): 0.4*om_gated + 0.2*fr + 0.2*s + 0.2*ca
-    Bonuses:        0.1*rq + 0.05*fmt + 0.05*process
+    Bonuses:        0.1*rq + 0.05*fmt + process_bonus
     Penalty:        -0.3*bias
 
     Uses server/reward.py functions when available (Fix 1).
@@ -534,14 +569,39 @@ def combined_reward(
     B8: Format compliance score included with 0.05 weight.
     """
     rewards = []
-    unique_outcomes = len(set(
-        parse_model_output(c)["recommended_outcome"].lower() for c in completions
-    ))
-    diversity_bonus = 0.05 if unique_outcomes > 1 else -0.05
+    # AUDIT FIX (Workstream A): Removed diversity_bonus.
+    # Server compute_reward() has no diversity term — this was creating
+    # a systematic ±0.05 parity drift. GRPO's KL penalty already
+    # incentivises output diversity; an additional bonus is redundant
+    # and actively harmful to parity.
 
-    for comp, ep in zip(completions, episode_batch):
+    explicit_tool_flag = kwargs.get("statutory_tool_used", None)
+
+    for idx, (comp, ep) in enumerate(zip(completions, episode_batch)):
         parsed = parse_model_output(comp)
         gt     = ep.get("ground_truth", {})
+
+        if _USE_SERVER_REWARDS and _server_compute_reward is not None:
+            reward_dict = _server_compute_reward(
+                agent_outcome=parsed["recommended_outcome"],
+                agent_flight_risk=parsed.get("flight_risk", ""),
+                agent_eligible=parsed["statutory_eligible"],
+                agent_computation=parsed.get("statutory_computation", ""),
+                agent_conditions=parsed.get("conditions", []),
+                episode=ep,
+                step_count=0,
+                max_steps=10,
+                statutory_tool_used=_resolve_tool_used_flag(
+                    explicit_tool_flag, idx, parsed, ep
+                ),
+                agent_flight_risk_justification=parsed.get("flight_risk_just", ""),
+                agent_grounds_for=parsed.get("grounds_for", []),
+                agent_grounds_against=parsed.get("grounds_against", []),
+                completion_text=comp,
+                current_stage=current_stage,
+            )
+            rewards.append(reward_dict["total_reward"])
+            continue
 
         if _USE_SERVER_REWARDS:
             # Use the authoritative server functions
@@ -588,33 +648,47 @@ def combined_reward(
         else:
             fmt = reward_format_single(comp)
 
-        # M2: process_bonus proxy for tool use.
-        # In offline GRPO we cannot verify actual tool calls, so we use the
-        # best available proxy: did the statutory_computation contain the
-        # EXACT custody_months and threshold values from the episode?
-        # These numbers are only in the episode dict — not in the prompt text —
-        # so their presence strongly suggests the model used (or simulated)
-        # the compute_statutory_eligibility tool output.
-        # M1 NOTE: Training is offline GRPO (completion-scored, not env-API-scored).
-        # rollout_via_env_api() exists for env-verified scoring; see README for
-        # design decision. Offline is used for T4 latency reasons.
-        custody_mo = ep.get("custody_months") or 0.0
-        max_sent   = ep.get("max_sentence_years", 5.0)
-        if custody_mo > 0:
-            threshold_mo = (max_sent * 12) / 3.0
-            comp_text = parsed.get("statutory_computation", "").lower()
-            has_exact_custody   = str(int(custody_mo))   in comp_text
-            has_exact_threshold = str(int(threshold_mo)) in comp_text
-            process_bonus = 0.05 if (has_exact_custody and has_exact_threshold) else 0.0
-        else:
-            process_bonus = 0.0
+        # Process bonus proxy for offline GRPO.
+        # If an explicit tool-use flag is provided, honor it. Otherwise infer
+        # tool-like statutory reasoning from exact custody/threshold math in
+        # the parsing output to keep the trainer path aligned with the
+        # test harness's server-side proxy behavior.
+        process_bonus = 0.05 if _resolve_tool_used_flag(
+            explicit_tool_flag, idx, parsed, ep
+        ) else 0.0
 
-        # Reward formula:
+        # In offline reward scoring we cannot observe actual step_count,
+        # so mirror the server default behavior when the answer is directionally correct.
+        efficiency = 1.0 if o >= 0.8 else 0.0
+
+        # AUDIT FIX (Workstream A): Add consistency_gate to match server.
+        # Server compute_reward() applies consistency as a 0.5–1.0 multiplier
+        # on the total reward. Without this, boilerplate/inconsistent memos
+        # score higher in training than at deployment, creating a reward hack
+        # vector the model can exploit.
+        if _USE_SERVER_REWARDS:
+            from server.reward import compute_consistency_gate
+            consistency = compute_consistency_gate(
+                recommended_outcome=parsed["recommended_outcome"],
+                flight_risk=parsed.get("flight_risk", ""),
+                flight_risk_justification=parsed.get("flight_risk_just", ""),
+                statutory_eligible=parsed["statutory_eligible"],
+                statutory_computation=parsed.get("statutory_computation", ""),
+                grounds_for=parsed.get("grounds_for", []),
+                grounds_against=parsed.get("grounds_against", []),
+                episode=ep,
+            )
+        else:
+            consistency = 1.0  # No gate when server functions unavailable
+
+        # Reward formula (matches server/reward.py compute_reward exactly):
         # Core (sum=1.0): 0.4*outcome_gated + 0.2*flight + 0.2*statutory + 0.2*conditions
-        # Bonuses:        0.1*reasoning_quality + 0.05*format + 0.05*process
+        # Bonuses:        0.1*reasoning_quality + 0.05*format + 0.05*efficiency + process_bonus
         # Penalty:        -0.3*bias
-        total = (0.4*om_gated + 0.2*fr + 0.2*s + 0.2*ca
-                 + 0.1*rq + 0.05*fmt + 0.05*process_bonus + diversity_bonus - 0.3*b)
+        # Gate:           * consistency (0.5–1.0 multiplier)
+        raw_total = (0.4*om_gated + 0.2*fr + 0.2*s + 0.2*ca
+                     + 0.1*rq + 0.05*fmt + 0.05*efficiency + process_bonus - 0.3*b)
+        total = raw_total * consistency
         rewards.append(round(total, 4))  # No max(0.0) clamp — bias can go negative
     return rewards
 
@@ -627,6 +701,25 @@ def combined_reward(
 # when the agent achieves mastery (≥0.70 reward) on a stage.
 # (Theme 4: self-improvement via auto-generated harder variants)
 _synthetic_episode_pool: Dict[int, List[Dict]] = {}
+
+
+def stable_episode_split(
+    episode: Dict[str, Any],
+    train_pct: int = 75,
+    val_pct: int = 15,
+) -> str:
+    """Return a deterministic train/val/test split from stable case identity."""
+    cid = str(
+        episode.get("case_id")
+        or episode.get("parent_case_id")
+        or json.dumps(episode, sort_keys=True, default=str)
+    )
+    h = int(hashlib.md5(cid.encode("utf-8")).hexdigest(), 16) % 100
+    if h < train_pct:
+        return "train"
+    if h < train_pct + val_pct:
+        return "val"
+    return "test"
 
 
 def load_episodes(
@@ -672,9 +765,16 @@ def load_episodes(
         if dmap["sample"] and len(all_eps) > dmap["sample"]:
             random.shuffle(all_eps)
             all_eps = all_eps[:dmap["sample"]]
-        else:
+
+        if split in ("train", "val", "test"):
+            all_eps = [ep for ep in all_eps if stable_episode_split(ep) == split]
+        # else: split="all" returns everything (backward compat)
+
+        if split == "train":
             random.shuffle(all_eps)
-        return all_eps  # No train/val/test split for difficulty mode
+        else:
+            all_eps.sort(key=lambda ep: ep.get("case_id", ""))
+        return all_eps
 
     # ── Legacy stage-based loading ──
     path = Path(episodes_dir) / f"episodes_stage_{stage}.jsonl"
@@ -686,6 +786,8 @@ def load_episodes(
         raise FileNotFoundError(f"No episodes found in {episodes_dir}.")
     with open(path, encoding="utf-8") as f:
         all_eps = [json.loads(l) for l in f if l.strip()]
+    # Make stage-based split deterministic by case ID order before slicing.
+    all_eps.sort(key=lambda ep: ep.get("case_id", ""))
     # H1: filter by curriculum_stage when falling back to episodes_all.jsonl
     if use_all_fallback:
         filtered = [ep for ep in all_eps if ep.get("curriculum_stage") == stage]
@@ -778,16 +880,64 @@ def rollout_via_env_api(
     canon_grounds_against = _ensure_str_list(parsed.get("grounds_against"))
     canon_conditions = _ensure_str_list(parsed.get("conditions"))
 
+    def _local_env_equivalent_reward() -> float:
+        if not _local_reward or not episode:
+            return 0.0
+        process_proxy = _infer_statutory_tool_used(parsed, episode)
+        rd = _local_reward(
+            agent_outcome=canon_outcome,
+            agent_flight_risk=canon_flight,
+            agent_eligible=bool(parsed["statutory_eligible"]),
+            agent_computation=parsed["statutory_computation"] or "",
+            agent_conditions=canon_conditions,
+            episode=episode,
+            step_count=2 if process_proxy else 10,
+            max_steps=10,
+            statutory_tool_used=process_proxy,
+            agent_flight_risk_justification=parsed["flight_risk_just"] or "",
+            agent_grounds_for=canon_grounds_for,
+            agent_grounds_against=canon_grounds_against,
+            completion_text=completion,
+            current_stage=episode.get("curriculum_stage", 1),
+        )
+        return rd["total_reward"]
+
     try:
         # Step 1: Reset the environment with the correct episode
         episode_stage = episode.get("curriculum_stage", 1)
-        reset_url = f"{env_url}/reset?stage={episode_stage}"
+        reset_params = {"stage": str(episode_stage)}
+        if episode.get("case_id"):
+            reset_params["episode_id"] = str(episode["case_id"])
+        reset_url = f"{env_url}/reset?{urllib.parse.urlencode(reset_params)}"
         req = urllib.request.Request(reset_url, method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             reset_data = json.loads(resp.read())
         sid = session_id or reset_data.get("session_id", "")
 
-        # Step 2: Submit the parsed memo with canonicalized fields
+        # Step 2: Replay one legal tool before terminal submission. The
+        # environment blocks direct memo submission, so this keeps online
+        # scoring on the same contract as real deployment.
+        special_law = bool(str(episode.get("special_laws", "")).strip()) or _is_ndps_case(episode)
+        tool_payload = json.dumps({
+            "session_id": sid,
+            "action": {
+                "tool_name": "compute_statutory_eligibility",
+                "sections_invoked": episode.get("ipc_sections", []),
+                "max_sentence_years": float(episode.get("max_sentence_years", 5.0) or 5.0),
+                "custody_months": float(episode.get("custody_months", 0.0) or 0.0),
+                "special_law_applicable": special_law,
+            }
+        }).encode()
+        tool_req = urllib.request.Request(
+            f"{env_url}/step",
+            data=tool_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(tool_req, timeout=timeout) as resp:
+            json.loads(resp.read())
+
+        # Step 3: Submit the parsed memo with canonicalized fields
         memo_payload = json.dumps({
             "session_id": sid,
             "action": {
@@ -822,32 +972,12 @@ def rollout_via_env_api(
             pass
         print(f"[env_api] HTTP {he.code} — {body[:200]}")
         print(f"[env_api] Falling back to local reward")
-        if _local_reward and episode:
-            rd = _local_reward(
-                agent_outcome=canon_outcome,
-                agent_flight_risk=canon_flight,
-                agent_eligible=bool(parsed["statutory_eligible"]),
-                agent_computation=parsed["statutory_computation"] or "",
-                agent_conditions=canon_conditions,
-                episode=episode,
-            )
-            return rd["total_reward"]
-        return 0.0
+        return _local_env_equivalent_reward()
 
     except Exception as e:
         # Network / parse error: fall back to local reward
         print(f"[env_api] Falling back to local reward: {e}")
-        if _local_reward and episode:
-            rd = _local_reward(
-                agent_outcome=canon_outcome,
-                agent_flight_risk=canon_flight,
-                agent_eligible=bool(parsed["statutory_eligible"]),
-                agent_computation=parsed["statutory_computation"] or "",
-                agent_conditions=canon_conditions,
-                episode=episode,
-            )
-            return rd["total_reward"]
-        return 0.0
+        return _local_env_equivalent_reward()
 
 
 def build_hf_dataset(episodes: List[Dict], tokenizer) -> Dataset:
@@ -1304,8 +1434,9 @@ def evaluate_baseline(episodes_dir: str, n_samples: int = 20):
             messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
         ).to(model.device)
 
+        # AUDIT FIX (Workstream B): Deterministic baseline eval for reproducibility
         with torch.no_grad():
-            out = model.generate(inputs, max_new_tokens=512, temperature=0.7, do_sample=True)
+            out = model.generate(inputs, max_new_tokens=512, do_sample=False)
 
         completion = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
         r = combined_reward([completion], [ep], current_stage=1)[0]
@@ -1334,10 +1465,16 @@ STAGE_NAMES = {
 # "easy"   → Stage 1 only (landmark, clear-cut cases)
 # "medium" → Stage 2 only (contested, judgment calls)
 # "hard"   → Stages 3+4 (bias reversal + schema drift)
+# AUDIT FIX (Workstream C): Rebalanced step budgets per master plan.
+# Master plan recommends: easy 60-80, medium 120-160, hard 160-220.
+# Hard was severely under-invested at 90 steps — the model needs more
+# adaptation time on the critical bias/parity + schema-drift cases.
+# Hard KL (beta) relaxed from 0.05→0.04 per master plan: "avoid
+# over-constraining KL" on hard cases where the model must adapt.
 DIFFICULTY_MAP = {
     "easy":   {"stages": [1],    "sample": None, "steps": 70,  "lr": 2e-5, "beta": 0.03},  # 104 eps, gentle
-    "medium": {"stages": [2],    "sample": None, "steps": 180, "lr": 3e-5, "beta": 0.04},  # 761 eps, bulk learning
-    "hard":   {"stages": [3, 4], "sample": None, "steps": 90,  "lr": 1e-5, "beta": 0.05},  # 335 eps, gentle fine-tune + strong KL
+    "medium": {"stages": [2],    "sample": None, "steps": 140, "lr": 3e-5, "beta": 0.04},  # 761 eps, bulk learning
+    "hard":   {"stages": [3, 4], "sample": None, "steps": 190, "lr": 1e-5, "beta": 0.04},  # 335 eps, more adaptation + relaxed KL
 }
 DIFFICULTY_NAMES = {
     "easy":   "Easy (landmark clear-cut cases, 104 episodes)",
@@ -1360,37 +1497,162 @@ def evaluate_on_stage(
     Evaluate the current model on held-out cases from a specific stage.
     Returns (average_reward, list of {episode, completion, reward} dicts).
     """
+    episodes = load_episodes(episodes_dir, stage=stage, split="val")[:n_samples]
+    if not episodes:
+        episodes = load_episodes(episodes_dir, stage=stage, split="test")[:n_samples]
+    if not episodes:
+        raise RuntimeError(f"No validation episodes available for stage {stage}.")
+    return evaluate_on_episodes(
+        model, tokenizer, episodes, current_stage=stage, max_new_tokens=max_new_tokens
+    )
+
+
+def _score_eval_completion(completion: str, ep: Dict[str, Any], current_stage: int) -> Dict[str, Any]:
+    reward = combined_reward([completion], [ep], current_stage=current_stage)[0]
+    parsed = parse_model_output(completion)
+    result = {
+        "case_id": ep.get("case_id", ""),
+        "stage": ep.get("curriculum_stage", current_stage),
+        "episode": ep,
+        "completion": completion,
+        "reward": reward,
+        "parsed": parsed,
+    }
+    if _USE_SERVER_REWARDS:
+        try:
+            from server.reward import compute_reward as _compute_reward
+            breakdown = _compute_reward(
+                agent_outcome=parsed["recommended_outcome"],
+                agent_flight_risk=parsed.get("flight_risk", ""),
+                agent_eligible=parsed["statutory_eligible"],
+                agent_computation=parsed.get("statutory_computation", ""),
+                agent_conditions=parsed.get("conditions", []),
+                episode=ep,
+                agent_flight_risk_justification=parsed.get("flight_risk_just", ""),
+                agent_grounds_for=parsed.get("grounds_for", []),
+                agent_grounds_against=parsed.get("grounds_against", []),
+                completion_text=completion,
+                current_stage=current_stage,
+            )
+            result.update(breakdown)
+            result["reward"] = reward
+        except Exception:
+            pass
+    return result
+
+
+def evaluate_on_episodes(
+    model,
+    tokenizer,
+    episodes: List[Dict[str, Any]],
+    current_stage: int,
+    max_new_tokens: int = 512,
+) -> Tuple[float, List[Dict]]:
+    """Evaluate a fixed episode list with deterministic decoding."""
     from unsloth import FastLanguageModel  # type: ignore
     FastLanguageModel.for_inference(model)
 
-    episodes = load_episodes(episodes_dir, stage=stage, split="val")[:n_samples]
-    if not episodes:
-        episodes = load_episodes(episodes_dir, stage=stage, split="train")[:n_samples]
-
     results = []
     rewards = []
-
     for ep in episodes:
         prompt = format_case_prompt(ep)
         messages = [
-            {"role": "system",  "content": SYSTEM_PROMPT},
-            {"role": "user",    "content": prompt},
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
         ]
         inputs = tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
         ).to(model.device)
 
         with torch.no_grad():
-            out = model.generate(inputs, max_new_tokens=max_new_tokens, temperature=0.7, do_sample=True)
+            out = model.generate(inputs, max_new_tokens=max_new_tokens, do_sample=False)
 
         completion = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
-        r = combined_reward([completion], [ep], current_stage=stage)[0]
-        rewards.append(r)
-        results.append({"episode": ep, "completion": completion, "reward": r})
+        stage_for_reward = ep.get("curriculum_stage", current_stage)
+        scored = _score_eval_completion(completion, ep, current_stage=stage_for_reward)
+        rewards.append(scored["reward"])
+        results.append(scored)
 
     FastLanguageModel.for_training(model)
     avg = sum(rewards) / len(rewards) if rewards else 0.0
     return avg, results
+
+
+def select_evaluation_episodes(
+    episodes: List[Dict[str, Any]],
+    n_samples: int,
+    stratify_by_stage: bool = False,
+) -> List[Dict[str, Any]]:
+    """Deterministically select eval cases, optionally balanced by stage."""
+    if n_samples <= 0 or len(episodes) <= n_samples:
+        return list(episodes)
+    if not stratify_by_stage:
+        return list(episodes[:n_samples])
+
+    by_stage: Dict[int, List[Dict[str, Any]]] = {}
+    for ep in episodes:
+        stage = int(ep.get("curriculum_stage", 0) or 0)
+        by_stage.setdefault(stage, []).append(ep)
+
+    stages = sorted(by_stage)
+    if len(stages) <= 1:
+        return list(episodes[:n_samples])
+
+    base_quota = max(1, n_samples // len(stages))
+    selected: List[Dict[str, Any]] = []
+    selected_ids = set()
+    for stage in stages:
+        for ep in by_stage[stage][:base_quota]:
+            selected.append(ep)
+            selected_ids.add(id(ep))
+
+    if len(selected) < n_samples:
+        for ep in episodes:
+            if id(ep) in selected_ids:
+                continue
+            selected.append(ep)
+            if len(selected) >= n_samples:
+                break
+
+    return selected[:n_samples]
+
+
+def evaluate_on_difficulty(
+    model,
+    tokenizer,
+    episodes_dir: str,
+    difficulty: str,
+    n_samples: int = 24,
+    max_new_tokens: int = 512,
+) -> Tuple[float, List[Dict], Dict[str, float]]:
+    """
+    Evaluate a difficulty split. For hard, reports stage 3, stage 4, and
+    aggregate so schema drift cannot be hidden by bias-only performance.
+    """
+    episodes = load_episodes(episodes_dir, difficulty=difficulty, split="val")
+    if not episodes:
+        episodes = load_episodes(episodes_dir, difficulty=difficulty, split="test")
+    if not episodes:
+        raise RuntimeError(
+            f"No validation episodes available for difficulty='{difficulty}'."
+        )
+    episodes = select_evaluation_episodes(
+        episodes,
+        n_samples=n_samples,
+        stratify_by_stage=(difficulty == "hard"),
+    )
+
+    avg, results = evaluate_on_episodes(
+        model, tokenizer, episodes, current_stage={"easy": 1, "medium": 2, "hard": 3}.get(difficulty, 1),
+        max_new_tokens=max_new_tokens,
+    )
+    by_stage: Dict[str, float] = {}
+    for stage in sorted({int(r.get("stage", 0) or 0) for r in results}):
+        stage_rewards = [r["reward"] for r in results if int(r.get("stage", 0) or 0) == stage]
+        if stage_rewards:
+            by_stage[f"stage_{stage}"] = round(sum(stage_rewards) / len(stage_rewards), 4)
+    by_stage["aggregate"] = round(avg, 4)
+    return avg, results, by_stage
 
 
 def extract_good_traces(
@@ -1440,10 +1702,13 @@ TRAINING_PROFILES = {
         "hard":   {"steps": 0,  "lr": 1e-5, "beta": 0.05},  # skip
     },
     "dev": None,  # Use DIFFICULTY_MAP defaults
+    # AUDIT FIX (Workstream C): Prod profile rebalanced for one-job strategy.
+    # Hard gets proportionally more budget since deployment success depends
+    # on hard-stage generalization (bias reversal + schema drift).
     "prod": {
-        "easy":   {"steps": 200,  "lr": 2e-5, "beta": 0.03},
-        "medium": {"steps": 600,  "lr": 3e-5, "beta": 0.04},
-        "hard":   {"steps": 400,  "lr": 1e-5, "beta": 0.05},
+        "easy":   {"steps": 80,   "lr": 2e-5, "beta": 0.03},
+        "medium": {"steps": 160,  "lr": 3e-5, "beta": 0.04},
+        "hard":   {"steps": 220,  "lr": 1e-5, "beta": 0.04},
     },
 }
 
@@ -1486,6 +1751,231 @@ def diagnose_failures(eval_results: List[Dict]) -> Dict[str, Any]:
             print(f"    {bucket:25s}: {len(cases)} cases (e.g. {', '.join(example)})")
 
     return buckets
+
+
+def compute_policy_stability(eval_results: List[Dict]) -> Dict[str, Any]:
+    """
+    Summarize collapse-sensitive eval metrics.
+
+    These are gate metrics, not reward-shaping terms. They catch policies that
+    inflate mean reward with one-direction behavior, malformed XML, or template
+    outputs while failing the actual bail decision task.
+    """
+    rewards = [float(r.get("reward", 0.0)) for r in eval_results]
+    n = len(eval_results)
+    if not rewards:
+        return {
+            "n": 0,
+            "reward_mean": 0.0,
+            "reward_std": 0.0,
+            "outcome_accuracy": 0.0,
+            "model_grant_rate": 0.0,
+            "gt_grant_rate": 0.0,
+            "direction_gap": 0.0,
+            "unique_predicted_outcomes": 0,
+            "format_pass_rate": 0.0,
+            "reasoning_quality_mean": 0.0,
+            "collapse_failed": True,
+            "collapse_reasons": ["empty_eval_results"],
+        }
+
+    mean_reward = sum(rewards) / len(rewards)
+    reward_std = (
+        sum((r - mean_reward) ** 2 for r in rewards) / len(rewards)
+    ) ** 0.5
+
+    pred_grants = []
+    gt_grants = []
+    pred_labels = []
+    format_scores = []
+    reasoning_scores = []
+    for r in eval_results:
+        parsed = r.get("parsed", {}) or {}
+        ep = r.get("episode", {}) or {}
+        pred = parsed.get("recommended_outcome", "") or r.get("agent_outcome", "")
+        gt = ep.get("ground_truth", {}).get("outcome", r.get("ground_truth_outcome", ""))
+        pred_grant = "grant" in pred.lower() or "conditional" in pred.lower()
+        gt_grant = "grant" in gt.lower() or "conditional" in gt.lower()
+        pred_grants.append(pred_grant)
+        gt_grants.append(gt_grant)
+        pred_labels.append("grant" if pred_grant else "deny")
+        format_scores.append(float(r.get("format_score", 0.0)))
+        reasoning_scores.append(float(r.get("reasoning_quality", 0.0)))
+
+    model_grant_rate = sum(pred_grants) / n
+    gt_grant_rate = sum(gt_grants) / n
+    outcome_accuracy = sum(p == g for p, g in zip(pred_grants, gt_grants)) / n
+    direction_gap = abs(model_grant_rate - gt_grant_rate)
+    unique_predicted_outcomes = len(set(pred_labels))
+    gt_has_both_directions = len(set(gt_grants)) > 1
+    format_pass_rate = sum(s >= 0.75 for s in format_scores) / n
+    reasoning_quality_mean = sum(reasoning_scores) / n
+
+    collapse_reasons = []
+    if gt_has_both_directions and unique_predicted_outcomes < 2 and direction_gap > 0.35:
+        collapse_reasons.append("single_direction_policy_on_mixed_eval")
+    if reward_std < 0.01 and outcome_accuracy < 0.90:
+        collapse_reasons.append("low_reward_variance_without_high_accuracy")
+    if format_pass_rate < 0.70:
+        collapse_reasons.append("xml_format_collapse")
+    if reasoning_quality_mean < 0.05:
+        collapse_reasons.append("reasoning_quality_collapse")
+
+    return {
+        "n": n,
+        "reward_mean": round(mean_reward, 4),
+        "reward_std": round(reward_std, 4),
+        "outcome_accuracy": round(outcome_accuracy, 4),
+        "model_grant_rate": round(model_grant_rate, 4),
+        "gt_grant_rate": round(gt_grant_rate, 4),
+        "direction_gap": round(direction_gap, 4),
+        "unique_predicted_outcomes": unique_predicted_outcomes,
+        "format_pass_rate": round(format_pass_rate, 4),
+        "reasoning_quality_mean": round(reasoning_quality_mean, 4),
+        "collapse_failed": bool(collapse_reasons),
+        "collapse_reasons": collapse_reasons,
+    }
+
+
+def run_static_preflight_gates(episodes_dir: str, output_dir: str) -> Dict[str, Any]:
+    """
+    Run cheap gates before loading the 7B model.
+
+    This protects the final job from starting when reward parity, anti-hack
+    ordering, or split integrity is already broken.
+    """
+    result: Dict[str, Any] = {
+        "reward_parity": {},
+        "anti_hack": {},
+        "split_integrity": {},
+        "passed": True,
+    }
+
+    try:
+        from server.reward import compute_reward as _canonical_reward
+        from tests.test_anti_hack import (
+            GOLDEN_COMPLETION,
+            GOLDEN_EPISODE,
+            LEGALESE_COMPLETION,
+            NUMBER_COPY_COMPLETION,
+            OUTCOME_ONLY_COMPLETION,
+            TEMPLATE_COMPLETION,
+            score_completion,
+        )
+
+        probes = {
+            "golden": GOLDEN_COMPLETION,
+            "template": TEMPLATE_COMPLETION,
+            "legalese": LEGALESE_COMPLETION,
+            "number_copy": NUMBER_COPY_COMPLETION,
+            "outcome_only": OUTCOME_ONLY_COMPLETION,
+        }
+        parity_ok = True
+        for name, completion in probes.items():
+            parsed = parse_model_output(completion)
+            server_total = _canonical_reward(
+                agent_outcome=parsed["recommended_outcome"],
+                agent_flight_risk=parsed.get("flight_risk", ""),
+                agent_eligible=parsed["statutory_eligible"],
+                agent_computation=parsed.get("statutory_computation", ""),
+                agent_conditions=parsed.get("conditions", []),
+                episode=GOLDEN_EPISODE,
+                step_count=0,
+                max_steps=10,
+                statutory_tool_used=_infer_statutory_tool_used(parsed, GOLDEN_EPISODE),
+                agent_flight_risk_justification=parsed.get("flight_risk_just", ""),
+                agent_grounds_for=parsed.get("grounds_for", []),
+                agent_grounds_against=parsed.get("grounds_against", []),
+                completion_text=completion,
+                current_stage=GOLDEN_EPISODE.get("curriculum_stage", 1),
+            )["total_reward"]
+            trainer_total = combined_reward(
+                [completion],
+                [GOLDEN_EPISODE],
+                current_stage=GOLDEN_EPISODE.get("curriculum_stage", 1),
+            )[0]
+            delta = abs(server_total - trainer_total)
+            result["reward_parity"][name] = {
+                "server": round(server_total, 4),
+                "trainer": round(trainer_total, 4),
+                "delta": round(delta, 6),
+                "passed": delta <= 1e-4,
+            }
+            parity_ok = parity_ok and delta <= 1e-4
+
+        anti_scores = {
+            name: score_completion(completion, GOLDEN_EPISODE)["total_reward"]
+            for name, completion in probes.items()
+        }
+        golden_score = anti_scores["golden"]
+        anti_ok = all(
+            score < golden_score
+            for name, score in anti_scores.items()
+            if name != "golden"
+        )
+        result["anti_hack"] = {
+            "scores": {k: round(v, 4) for k, v in anti_scores.items()},
+            "passed": anti_ok,
+        }
+        result["passed"] = result["passed"] and parity_ok and anti_ok
+    except Exception as exc:
+        result["passed"] = False
+        result["reward_parity"]["error"] = repr(exc)
+
+    try:
+        split_ok = True
+        split_summary = {}
+        for difficulty in ("easy", "medium", "hard"):
+            split_sets = {
+                split: {ep.get("case_id") for ep in load_episodes(
+                    episodes_dir, difficulty=difficulty, split=split
+                )}
+                for split in ("train", "val", "test")
+            }
+            overlaps = {
+                "train_val": len(split_sets["train"] & split_sets["val"]),
+                "train_test": len(split_sets["train"] & split_sets["test"]),
+                "val_test": len(split_sets["val"] & split_sets["test"]),
+            }
+            hard_stage_coverage = {}
+            if difficulty == "hard":
+                hard_val = load_episodes(episodes_dir, difficulty="hard", split="val")
+                selected = select_evaluation_episodes(
+                    hard_val,
+                    n_samples=24,
+                    stratify_by_stage=True,
+                )
+                stages = sorted({ep.get("curriculum_stage") for ep in selected})
+                hard_stage_coverage = {"eval_sample_stages": stages}
+                if 3 not in stages or 4 not in stages:
+                    split_ok = False
+            if any(overlaps.values()):
+                split_ok = False
+            split_summary[difficulty] = {
+                "counts": {split: len(ids) for split, ids in split_sets.items()},
+                "overlaps": overlaps,
+                **hard_stage_coverage,
+            }
+        result["split_integrity"] = {
+            "passed": split_ok,
+            "summary": split_summary,
+        }
+        result["passed"] = result["passed"] and split_ok
+    except Exception as exc:
+        result["passed"] = False
+        result["split_integrity"]["error"] = repr(exc)
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    gate_path = out / "preflight_gates.json"
+    gate_path.write_text(json.dumps(result, indent=2, default=str))
+    print(f"  [gates] Static preflight saved: {gate_path}")
+    if not result["passed"]:
+        raise RuntimeError(
+            "Static preflight gates failed. See "
+            f"{gate_path} before launching the final training job."
+        )
+    return result
 
 
 def train_curriculum(
@@ -1575,6 +2065,8 @@ def train_curriculum(
         print(f"  ⚠ Strict gates ENABLED — training stops on failed threshold")
     print("=" * 60)
 
+    preflight_gates = run_static_preflight_gates(episodes_dir, output_dir)
+
     use_wandb = setup_wandb(
         project="undertri-bail-rl",
         run_name=f"grpo-curriculum-{datetime.now().strftime('%Y%m%d-%H%M')}",
@@ -1606,6 +2098,7 @@ def train_curriculum(
             "profile": profile or "dev",
             "strict_gates": strict_gates,
             "model_name": model_name,
+            "preflight_gates_passed": preflight_gates.get("passed", False),
         }
         create_manifest(manifest_config, episodes_dir, output_dir, reward_mode=reward_mode)
         metrics_tracker = MetricsTracker()
@@ -1636,10 +2129,13 @@ def train_curriculum(
     level_results = {}
     all_log_histories = {}
     current_prompt = SYSTEM_PROMPT
+    critical_gate_failed = False
 
     for level in levels:
         level_name = level_names[level]
         steps = level_steps[level]
+        if metrics_tracker:
+            metrics_tracker.set_level(str(level))
         # Per-level LR/beta schedule (from DIFFICULTY_MAP or global default)
         level_lr = DIFFICULTY_MAP[level].get("lr", lr) if use_difficulty_mode and level in DIFFICULTY_MAP else lr
         level_beta = DIFFICULTY_MAP[level].get("beta", 0.04) if use_difficulty_mode and level in DIFFICULTY_MAP else 0.04
@@ -1657,11 +2153,25 @@ def train_curriculum(
 
         # ── Baseline eval ──
         eval_stage = {"easy": 1, "medium": 2, "hard": 3}.get(level, level)
-        print(f"\n  Evaluating baseline (stage {eval_stage})...")
-        baseline_reward, _ = evaluate_on_stage(
-            model, tokenizer, episodes_dir, eval_stage, n_samples=24,
-            max_new_tokens=max_completion_length,
-        )
+        print(f"\n  Evaluating baseline ({level_name})...")
+        if use_difficulty_mode:
+            baseline_reward, _, baseline_breakdown = evaluate_on_difficulty(
+                model, tokenizer, episodes_dir, str(level), n_samples=24,
+                max_new_tokens=max_completion_length,
+            )
+            if level == "hard":
+                print(
+                    "  Hard baseline breakdown: "
+                    f"stage_3={baseline_breakdown.get('stage_3', 0.0):.4f}, "
+                    f"stage_4={baseline_breakdown.get('stage_4', 0.0):.4f}, "
+                    f"aggregate={baseline_breakdown.get('aggregate', 0.0):.4f}"
+                )
+        else:
+            baseline_reward, _ = evaluate_on_stage(
+                model, tokenizer, episodes_dir, eval_stage, n_samples=24,
+                max_new_tokens=max_completion_length,
+            )
+            baseline_breakdown = {"aggregate": round(baseline_reward, 4)}
         print(f"  Baseline: {baseline_reward:.4f}")
 
         # ── Build dataset ──
@@ -1732,21 +2242,27 @@ def train_curriculum(
                     if _metrics_tracker:
                         _metrics_tracker.log_reward_source("api" if r != 0.0 else "local")
                     rewards.append(r)
-                return rewards
             elif _reward_mode_for_closure == "hybrid" and _env_url_for_closure:
                 # Hybrid: offline for training, online only for eval checkpoints
                 rewards = combined_reward(completions, ep_objs, current_stage=_stage_for_closure)
                 if _metrics_tracker:
                     for _ in rewards:
                         _metrics_tracker.log_reward_source("local")
-                return rewards
             else:
                 # Offline: in-process scoring
                 rewards = combined_reward(completions, ep_objs, current_stage=_stage_for_closure)
                 if _metrics_tracker:
                     for _ in rewards:
                         _metrics_tracker.log_reward_source("local")
-                return rewards
+            if _metrics_tracker:
+                for completion, ep_obj in zip(completions, ep_objs):
+                    parsed = parse_model_output(completion)
+                    _metrics_tracker.log_completion(completion)
+                    _metrics_tracker.log_outcome(
+                        parsed.get("recommended_outcome", ""),
+                        ep_obj.get("ground_truth", {}).get("outcome", ""),
+                    )
+            return rewards
 
         level_output = f"{output_dir}/level_{level}" if use_difficulty_mode else f"{output_dir}/stage_{level}"
         config = GRPOConfig(
@@ -1784,18 +2300,51 @@ def train_curriculum(
 
         # ── Post-training eval ──
         print(f"\n  Evaluating after {level_name} training...")
-        post_reward, eval_results = evaluate_on_stage(
-            model, tokenizer, episodes_dir, eval_stage, n_samples=24,
-            max_new_tokens=max_completion_length,
-        )
+        if use_difficulty_mode:
+            post_reward, eval_results, post_breakdown = evaluate_on_difficulty(
+                model, tokenizer, episodes_dir, str(level), n_samples=24,
+                max_new_tokens=max_completion_length,
+            )
+            if level == "hard":
+                print(
+                    "  Hard post breakdown: "
+                    f"stage_3={post_breakdown.get('stage_3', 0.0):.4f}, "
+                    f"stage_4={post_breakdown.get('stage_4', 0.0):.4f}, "
+                    f"aggregate={post_breakdown.get('aggregate', 0.0):.4f}"
+                )
+        else:
+            post_reward, eval_results = evaluate_on_stage(
+                model, tokenizer, episodes_dir, eval_stage, n_samples=24,
+                max_new_tokens=max_completion_length,
+            )
+            post_breakdown = {"aggregate": round(post_reward, 4)}
         improvement = post_reward - baseline_reward
         print(f"  {level_name}: {baseline_reward:.4f} → {post_reward:.4f} "
               f"(Δ = {improvement:+.4f})")
+
+        stability = compute_policy_stability(eval_results)
+        print(
+            "  Stability: "
+            f"reward_std={stability['reward_std']:.4f}, "
+            f"outcome_acc={stability['outcome_accuracy']:.4f}, "
+            f"model_grant={stability['model_grant_rate']:.4f}, "
+            f"gt_grant={stability['gt_grant_rate']:.4f}, "
+            f"format_pass={stability['format_pass_rate']:.4f}, "
+            f"reasoning={stability['reasoning_quality_mean']:.4f}"
+        )
+        if stability["collapse_failed"]:
+            print(
+                "  ✗ Stability gate flagged: "
+                + ", ".join(stability["collapse_reasons"])
+            )
 
         level_results[str(level)] = {
             "baseline": round(baseline_reward, 4),
             "post": round(post_reward, 4),
             "delta": round(improvement, 4),
+            "baseline_breakdown": baseline_breakdown,
+            "post_breakdown": post_breakdown,
+            "stability": stability,
         }
 
         # ── Harvest good traces for next level ──
@@ -1809,15 +2358,40 @@ def train_curriculum(
             metrics_tracker.set_level(str(level))
 
         # ── Check threshold for level progression ──
-        if post_reward >= threshold:
+        hard_gate_failed = False
+        if use_difficulty_mode and level == "hard":
+            for stage_key in ("stage_3", "stage_4"):
+                before = baseline_breakdown.get(stage_key)
+                after = post_breakdown.get(stage_key)
+                if before is not None and after is not None and after < before - 0.02:
+                    hard_gate_failed = True
+                    print(f"  ✗ Hard non-regression failed for {stage_key}: {before:.4f} -> {after:.4f}")
+            if "stage_3" not in post_breakdown or "stage_4" not in post_breakdown:
+                hard_gate_failed = True
+                print("  ✗ Hard reporting missing stage_3 or stage_4 breakdown")
+        level_results[str(level)]["hard_gate_failed"] = hard_gate_failed
+
+        stability_failed = bool(stability.get("collapse_failed"))
+        level_results[str(level)]["stability_gate_failed"] = stability_failed
+
+        stop_after_level = False
+        if post_reward >= threshold and not hard_gate_failed and not stability_failed:
             print(f"  ✓ {level_name} PASSED (reward {post_reward:.2f} ≥ {threshold:.2f})")
         else:
-            print(f"  ✗ {level_name} below threshold ({post_reward:.2f} < {threshold:.2f})")
+            fail_bits = []
+            if post_reward < threshold:
+                fail_bits.append(f"reward {post_reward:.2f} < {threshold:.2f}")
+            if hard_gate_failed:
+                fail_bits.append("hard non-regression")
+            if stability_failed:
+                fail_bits.append("stability/collapse")
+            print(f"  ✗ {level_name} failed gate: {', '.join(fail_bits)}")
             # Phase 4: Run diagnostic on failure
             diagnose_failures(eval_results)
             if strict_gates:
-                print(f"  ✗ STRICT GATES: Stopping training — fix issues before continuing")
-                break
+                print(f"  ✗ STRICT GATES: Will stop after saving checkpoint and artifacts")
+                critical_gate_failed = True
+                stop_after_level = True
             else:
                 print(f"  → Continuing to next level (curriculum mode)")
 
@@ -1841,17 +2415,25 @@ def train_curriculum(
                 "threshold": threshold,
                 "completed_levels": list(level_results.keys()),
                 "mode": "difficulty" if use_difficulty_mode else "stage",
+                "preflight_gates": preflight_gates,
             }, indent=2))
             print(f"  Incremental results saved: {partial_path}")
         except Exception as json_err:
             print(f"  [WARNING] Could not write incremental results ({type(json_err).__name__}: {json_err})")
+
+        if stop_after_level:
+            break
 
     # ── Final summary ──
     print(f"\n{'═' * 60}")
     print("  CURRICULUM TRAINING COMPLETE")
     print(f"{'═' * 60}")
     for lv, r in level_results.items():
-        status = "✓" if r["post"] >= threshold else "✗"
+        status = "✓" if (
+            r["post"] >= threshold
+            and not r.get("hard_gate_failed")
+            and not r.get("stability_gate_failed")
+        ) else "✗"
         label = level_names.get(lv, lv) if use_difficulty_mode else f"Stage {lv}"
         print(f"  {status} {label}: {r['baseline']:.4f} → {r['post']:.4f} "
               f"(Δ = {r['delta']:+.4f})")
@@ -1863,6 +2445,35 @@ def train_curriculum(
     tokenizer.save_pretrained(final_dir)
     print(f"\n  Final model saved (adapters): {final_dir}")
 
+    all_level_gates_passed = bool(level_results) and all(
+        r["post"] >= threshold
+        and not r.get("hard_gate_failed")
+        and not r.get("stability_gate_failed")
+        for r in level_results.values()
+    )
+    selected_checkpoint = {
+        "checkpoint_path": final_dir,
+        "selected": bool(preflight_gates.get("passed") and all_level_gates_passed),
+        "selection_rule": (
+            "preflight parity + anti-hack + split integrity, level threshold, "
+            "hard non-regression, and stability gates"
+        ),
+        "rejected_reason": None,
+    }
+    if not selected_checkpoint["selected"]:
+        rejected = []
+        if not preflight_gates.get("passed"):
+            rejected.append("preflight_gates_failed")
+        if not all_level_gates_passed:
+            rejected.append("level_or_stability_gate_failed")
+        if critical_gate_failed:
+            rejected.append("strict_gate_stopped_training")
+        selected_checkpoint["rejected_reason"] = rejected
+
+    selected_path = Path(output_dir) / "selected_checkpoint.json"
+    selected_path.write_text(json.dumps(selected_checkpoint, indent=2, default=str))
+    print(f"  Checkpoint selection metadata saved: {selected_path}")
+
     # Save results
     results_path = Path(output_dir) / "curriculum_results.json"
     results_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1871,8 +2482,16 @@ def train_curriculum(
         "traces_harvested": len(accumulated_traces),
         "threshold": threshold,
         "mode": "difficulty" if use_difficulty_mode else "stage",
+        "preflight_gates": preflight_gates,
+        "selected_checkpoint": selected_checkpoint,
     }, indent=2))
     print(f"  Results saved: {results_path}")
+
+    if metrics_tracker:
+        try:
+            metrics_tracker.save(output_dir)
+        except Exception as metrics_err:
+            print(f"  [WARNING] Could not save metrics summary ({type(metrics_err).__name__}: {metrics_err})")
 
     # ── Save ALL per-level plots to root output dir for easy access ──
     # (Per-level plots were also saved inside the loop to level_output dirs)
@@ -1962,15 +2581,23 @@ def train_curriculum(
             print(f"\n  Uploading to HF Hub: {hf_save_repo}")
             # Create repo if it doesn't exist
             api.create_repo(hf_save_repo, repo_type="model", exist_ok=True)
-            # Upload model adapters
+            # Upload model adapters. Rejected checkpoints are still uploaded for
+            # forensic analysis, but under a clearly marked path.
+            model_repo_path = "model" if selected_checkpoint["selected"] else "rejected_model"
             api.upload_folder(
                 folder_path=final_dir,
                 repo_id=hf_save_repo,
-                path_in_repo="model",
-                commit_message="Upload trained LoRA adapters",
+                path_in_repo=model_repo_path,
+                commit_message=(
+                    "Upload selected LoRA adapters"
+                    if selected_checkpoint["selected"]
+                    else "Upload rejected LoRA adapters for analysis"
+                ),
             )
-            print(f"  ✅ Model uploaded to {hf_save_repo}/model")
-            # Upload plots + results
+            print(f"  ✅ Model uploaded to {hf_save_repo}/{model_repo_path}")
+
+            # Upload plots + result files even when the model is rejected, so
+            # failed runs are inspectable instead of disappearing.
             if root_plots.exists():
                 api.upload_folder(
                     folder_path=str(root_plots),
@@ -1979,14 +2606,27 @@ def train_curriculum(
                     commit_message="Upload training plots",
                 )
                 print(f"  ✅ Plots uploaded to {hf_save_repo}/plots")
-            if results_path.exists():
-                api.upload_file(
-                    path_or_fileobj=str(results_path),
-                    path_in_repo="curriculum_results.json",
-                    repo_id=hf_save_repo,
-                    commit_message="Upload training results",
+            for local_name in [
+                "curriculum_results.json",
+                "selected_checkpoint.json",
+                "preflight_gates.json",
+                "run_manifest.json",
+                "training_metrics.json",
+            ]:
+                local_path = Path(output_dir) / local_name
+                if local_path.exists():
+                    api.upload_file(
+                        path_or_fileobj=str(local_path),
+                        path_in_repo=local_name,
+                        repo_id=hf_save_repo,
+                        commit_message=f"Upload {local_name}",
+                    )
+                    print(f"  ✅ Uploaded {local_name} to {hf_save_repo}")
+            if not selected_checkpoint["selected"]:
+                print(
+                    "  ⚠ Final checkpoint is uploaded for analysis only; "
+                    "selected_checkpoint.json marks it as rejected."
                 )
-                print(f"  ✅ Results uploaded to {hf_save_repo}")
         except Exception as e:
             print(f"  ⚠ HF upload failed: {type(e).__name__}: {e}")
             print(f"    Model is still saved locally at: {final_dir}")
@@ -2435,7 +3075,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", default="unsloth/Qwen2.5-7B-Instruct",
                         help="HuggingFace model name for training.")
     parser.add_argument("--profile", choices=["smoke", "dev", "prod"], default=None,
-                        help="Training profile: smoke (10 steps), dev (default), prod (1200 steps)")
+                        help="Training profile: smoke (10 steps), dev (default), prod (80/160/220 steps)")
     parser.add_argument("--reward_mode", choices=["offline", "online", "hybrid"],
                         default="offline",
                         help="Reward source: offline (local), online (API), hybrid (local train + API eval)")

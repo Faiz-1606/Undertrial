@@ -176,13 +176,14 @@ R = 0.4 × outcome_match (gated by think_factor)
   + 0.2 × statutory_accuracy
   + 0.2 × condition_appropriateness
   + 0.1 × reasoning_quality                (bonus)
+  + 0.05 × efficiency_bonus                (direction-correct only)
   + 0.05 × format_compliance               (bonus)
   + 0.05 × process_bonus                   (tool-use proxy, bonus)
-  ± 0.05 × diversity_bonus                 (anti-collapse signal)
   − 0.3 × bias_penalty                     (fires on parity violations)
+  multiplied by consistency_gate           (0.5–1.0 anti-hack gate)
 ```
 
-**Reward range:** core components sum to 1.0; with bonuses, total can reach ~1.15; with bias penalty, it can drop to ~0.7 on a bias-flagged case answered without parity reasoning.
+**Reward range:** core components sum to 1.0; with bonuses, total can reach ~1.25 before the consistency multiplier; bias penalties and consistency failures reduce exploitable or contradictory completions.
 
 All components are **fully deterministic and rule-based** — no LLM-as-judge.
 
@@ -193,10 +194,11 @@ All components are **fully deterministic and rule-based** — no LLM-as-judge.
 | **Statutory** | 0–1 | IPC/BNSS threshold computation, **direction-gated**, NDPS Section 37 aware |
 | **Conditions** | 0–1 | Bail-condition appropriateness for crime / risk profile |
 | **Reasoning Quality** | 0–1 | Anchoring + arithmetic + grounds specificity (10% bonus) |
+| **Efficiency Bonus** | 0–1 | Small bonus only when the outcome direction is already correct |
 | **Format Compliance** | 0–1 | XML tag adherence to system prompt (5% bonus) |
-| **Process Bonus** | 0 or 0.05 | Awarded if both `custody_months` and threshold computation appear verbatim in `<think>` (proxy for tool use) |
-| **Diversity Bonus** | ±0.05 | +0.05 if rollouts produce ≥2 distinct outcomes; −0.05 if all rollouts collapse to the same outcome |
+| **Process Bonus** | 0 or 0.05 | Awarded if both `custody_months` and threshold computation appear in the statutory computation (offline proxy for tool use) |
 | **Bias Penalty** | −0.3 | Fires if parity argument ignored in bias-flagged cases |
+| **Consistency Gate** | 0.5–1.0 | Multiplies reward down for cross-field contradictions, boilerplate, or weak justifications |
 
 ### Anti-Reward-Hacking Design
 
@@ -206,8 +208,8 @@ All components are **fully deterministic and rule-based** — no LLM-as-judge.
 - **Direction gate:** Wrong bail direction → statutory bonus capped (prevents partial-credit gaming)
 - **Bias penalty operates as a separate signal**, not folded into outcome (ensures visibility)
 - **Schema drift (Stage 4)** tests adaptability, not pattern memorisation
-- **Diversity signal** flags reward-collapse — prints `[WARNING] Reward variance collapsed` if the policy converges to a single outcome
-- **Tool-invocation tracking:** `process_bonus` only fires when episode-specific custody/threshold values (which are **not** in the user prompt) appear in the model's reasoning — strong proxy for actual tool use
+- **Stability gates** flag reward collapse, single-direction policies, XML collapse, and weak reasoning before a checkpoint is selected
+- **Tool-invocation tracking:** `process_bonus` fires only when episode-specific custody/threshold values appear in the model's statutory computation — an offline proxy kept aligned with the server reward path
 
 **Gaming resistance verified via unit tests:**
 
@@ -285,13 +287,20 @@ curl https://username-undertri-ai.hf.space/health
 # 3. Set WandB auth (optional, for live metric tracking)
 export WANDB_API_KEY=your_wandb_api_key
 
-# 4. Run curriculum training as a one-shot HF Job (A10G, ~2h)
-hf jobs uv run --flavor a10g-large --timeout 3h \
+# 4. Run curriculum training as a one-shot HF Job (A10G, gated 7B profile)
+hf jobs uv run --flavor a10g-large --timeout 5h \
   --secrets HF_TOKEN \
   https://raw.githubusercontent.com/Faiz-1606/Undertrial/main/training/run_hf_job.py \
   --curriculum \
-  --env_url https://username-undertri-ai.hf.space \
-  --output ./output/undertrial_grpo
+  --profile prod \
+  --strict_gates \
+  --reward_mode offline \
+  --model_name unsloth/Qwen2.5-7B-Instruct \
+  --batch_size 1 \
+  --grad_accum 8 \
+  --max_completion_length 640 \
+  --output ./output/undertrial_grpo \
+  --hf_save_repo username/undertrial-grpo-final
 ```
 
 ### Colab Notebook (Step-by-Step)

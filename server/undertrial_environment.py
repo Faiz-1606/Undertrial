@@ -186,6 +186,10 @@ class UndertriAIEnvironment(Environment):
                 agent_flight_risk_justification  = action.flight_risk_justification,
                 agent_grounds_for                = action.grounds_for_bail,
                 agent_grounds_against            = action.grounds_against_bail,
+                # AUDIT FIX (Workstream A): Pass current_stage so think_factor
+                # gating matches training behavior at each curriculum stage.
+                # Previously omitted, causing server to always use stage=1 default.
+                current_stage                    = self._current_stage,
             )
             # Apply skip penalty (can push total legitimately negative)
             reward_dict["total_reward"] = round(reward_dict["total_reward"] - no_tool_penalty, 4)
@@ -521,6 +525,9 @@ class UndertriAIEnvironment(Environment):
         )
 
     def _format_memo_result(self, memo: SubmitMemoAction, reward: Dict[str, Any]) -> str:
+        # AUDIT FIX: Display all reward components for full observability.
+        # Previously missing reasoning_quality, format_score, efficiency_bonus,
+        # consistency_gate, and process_bonus — making parity debugging harder.
         lines = [
             "═══ BAIL ASSESSMENT MEMO SUBMITTED ═══",
             f"Recommended Outcome:  {memo.recommended_outcome}",
@@ -529,14 +536,21 @@ class UndertriAIEnvironment(Environment):
             f"Confidence:           {memo.confidence}",
             "",
             "── Reward Breakdown ──",
-            f"  Outcome Match:        {reward['outcome_match']:.2f} × 0.40",
-            f"  Flight Risk Accuracy: {reward['flight_risk_accuracy']:.2f} × 0.20",
-            f"  Statutory Accuracy:   {reward['statutory_accuracy']:.2f} × 0.20",
-            f"  Condition Score:      {reward['condition_appropriateness']:.2f} × 0.20",
-            f"  Bias Penalty:       − {reward['bias_penalty']:.2f} × 0.30",
+            f"  Outcome Match:        {reward.get('outcome_match', 0):.2f} × 0.40",
+            f"  Think Factor:         {reward.get('think_factor', 1.0):.2f}",
+            f"  Outcome (gated):      {reward.get('outcome_match_gated', 0):.2f}",
+            f"  Flight Risk Accuracy: {reward.get('flight_risk_accuracy', 0):.2f} × 0.20",
+            f"  Statutory Accuracy:   {reward.get('statutory_accuracy', 0):.2f} × 0.20",
+            f"  Condition Score:      {reward.get('condition_appropriateness', 0):.2f} × 0.20",
+            f"  Reasoning Quality:    {reward.get('reasoning_quality', 0):.2f} × 0.10",
+            f"  Format Score:         {reward.get('format_score', 0):.2f} × 0.05",
+            f"  Efficiency Bonus:     {reward.get('efficiency_bonus', 0):.2f} × 0.05",
+            f"  Process Bonus:        {reward.get('process_bonus', 0):.2f}",
+            f"  Bias Penalty:       − {reward.get('bias_penalty', 0):.2f} × 0.30",
+            f"  Consistency Gate:     {reward.get('consistency_gate', 1.0):.2f}",
             f"  ─────────────────────────────────",
-            f"  TOTAL REWARD:         {reward['total_reward']:.4f}",
+            f"  TOTAL REWARD:         {reward.get('total_reward', 0):.4f}",
             "",
-            f"Ground Truth: {reward['ground_truth_outcome']}",
+            f"Ground Truth: {reward.get('ground_truth_outcome', 'N/A')}",
         ]
         return "\n".join(lines)

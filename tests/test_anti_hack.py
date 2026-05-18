@@ -4,7 +4,7 @@ UndertriAI — Anti-Reward-Hack Probe Tests
 Tests 4 adversarial completions against 1 genuine golden memo.
 All probes MUST score lower than the golden memo.
 
-Mode: WARN-ONLY (prints warnings, does not fail CI).
+Mode: strict gate (adversarial probes must stay below the golden memo).
 """
 
 import json
@@ -170,7 +170,7 @@ def score_completion(completion: str, episode: dict) -> dict:
 def test_anti_hack_probes():
     """
     All adversarial probes must score lower than the golden genuine memo.
-    Mode: WARN-ONLY.
+    All adversarial probes must score lower than the golden genuine memo.
     """
     probes = {
         "golden_genuine": GOLDEN_COMPLETION,
@@ -219,7 +219,7 @@ def test_anti_hack_probes():
     else:
         print("\n  ⚠️  Some probes scored >= golden — review reward function")
 
-    return results
+    assert all_passed, "Anti-hack probe gate failed: some adversarial probes scored >= golden."
 
 
 def test_consistency_gate_values():

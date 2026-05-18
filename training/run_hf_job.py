@@ -37,9 +37,14 @@ Canonical HF Jobs command
     hf jobs uv run --flavor a10g-large --timeout 5h --secrets HF_TOKEN \
         https://raw.githubusercontent.com/Faiz-1606/Undertrial/main/training/run_hf_job.py \
         --curriculum \
-        --env_url https://draken1606-undertrial-ai.hf.space \
-        --steps 300 --batch_size 1 --grad_accum 8 \
-        --output ./output/undertrial_grpo
+        --profile prod \
+        --strict_gates \
+        --reward_mode offline \
+        --model_name unsloth/Qwen2.5-7B-Instruct \
+        --batch_size 1 --grad_accum 8 \
+        --max_completion_length 640 \
+        --output ./output/undertrial_grpo \
+        --hf_save_repo Draken1606/undertrial-grpo-final
 
 Everything after the script URL is forwarded verbatim to ``train_grpo.py``.
 
@@ -162,9 +167,26 @@ def _forward_args(extra: list[str], work_root: Path) -> list[str]:
     Does not override any flag the user supplied.
     """
     args = list(extra)
+    if not args:
+        args = [
+            "--curriculum",
+            "--profile", "prod",
+            "--strict_gates",
+            "--reward_mode", "offline",
+            "--model_name", "unsloth/Qwen2.5-7B-Instruct",
+            "--batch_size", "1",
+            "--grad_accum", "8",
+            "--max_completion_length", "640",
+            "--output", "./output/undertrial_grpo",
+        ]
     if "--episodes_dir" not in args:
         args += ["--episodes_dir", str(work_root / "data" / "episodes")]
-    if "--env_url" not in args and "--offline" not in args:
+    reward_mode_offline = (
+        "--reward_mode" in args
+        and args.index("--reward_mode") + 1 < len(args)
+        and args[args.index("--reward_mode") + 1] == "offline"
+    )
+    if "--env_url" not in args and "--offline" not in args and not reward_mode_offline:
         args += ["--env_url", DEFAULT_ENV_URL]
     return args
 

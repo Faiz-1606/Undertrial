@@ -1,5 +1,7 @@
 # Python
 __pycache__/
+.pytest_cache/
+pytest-cache-files-*/
 *.py[cod]
 *.pyo
 *.egg-info/
@@ -15,6 +17,9 @@ env/
 
 # Data (small episode JSONL files are committed for HF Spaces deployment)
 # data/episodes/*.jsonl
+
+# Local handover/audit notes from coding agents
+docs/
 
 # Model outputs
 output/
